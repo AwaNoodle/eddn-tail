@@ -4,41 +4,53 @@ A KinesisTail-like TUI for monitoring the Elite Dangerous Data Network (EDDN) li
 
 Connects to EDDN's ZeroMQ PUB/SUB relay and displays all messages flowing through the network in real-time — useful for verifying your own submissions or just watching the galaxy's data flow.
 
-## Requirements
+## Installation
 
+```bash
+pip install eddn-tail
 ```
-pip install pyzmq textual rich
+
+Or install from source:
+
+```bash
+pip install .
+```
+
+Or run directly without installing:
+
+```bash
+python eddn_tail.py [options]
 ```
 
 ## Usage
 
 ```bash
 # Watch all EDDN messages
-python eddn_tail.py
+eddn-tail
 
 # Filter to Scan events only
-python eddn_tail.py -f Scan
+eddn-tail -f Scan
 
 # Filter to your uploaderID (see your own submissions)
-python eddn_tail.py -u <your_uploader_id>
+eddn-tail -u <your_uploader_id>
 
 # Filter by system name
-python eddn_tail.py -s Sol
+eddn-tail -s Sol
 
 # Filter by station name
-python eddn_tail.py -t Jameson Memorial
+eddn-tail -t Jameson Memorial
 
 # Filter by schema
-python eddn_tail.py -S commodity/3
+eddn-tail -S commodity/3
 
 # Combine filters (AND logic)
-python eddn_tail.py -f FSDJump -s Sol
+eddn-tail -f FSDJump -s Sol
 
 # Connect to beta EDDN
-python eddn_tail.py --beta
+eddn-tail --beta
 
 # Connect to dev EDDN
-python eddn_tail.py --dev
+eddn-tail --dev
 ```
 
 ## Keybindings
@@ -65,7 +77,7 @@ EDDN is a publish/subscribe message relay. When tools (like EDMC, EDDI, or Decky
 
 ### Verifying your own submissions
 
-1. Start `eddn_tail.py -u <your_uploader_id>` on any machine with internet access
+1. Start `eddn-tail -u <your_uploader_id>` on any machine with internet access
 2. Run your EDDN sender tool (EDMC, Decky plugin, etc.)
 3. Watch the TUI — your submissions appear in real-time
 4. Select any row to inspect the full JSON payload
@@ -97,6 +109,13 @@ Messages on the wire are zlib-compressed JSON with this structure:
 
 Supported schemas: `journal/1`, `commodity/3`, `outfitting/2`, `shipyard/2`.
 
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
 ## License
 
-MIT
+MIT © AwaNoodle

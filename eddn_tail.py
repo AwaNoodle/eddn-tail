@@ -6,38 +6,37 @@ Connects to the EDDN ZeroMQ PUB/SUB relay, decompresses messages,
 and displays them in a filterable terminal UI.
 
 Usage:
-    eddn_tail.py                    # Watch all messages
-    eddn_tail.py -f Scan            # Filter to Scan events
-    eddn_tail.py -f FSDJump         # Filter to FSDJump events
-    eddn_tail.py -u myuploaderid    # Filter by uploaderID
-    eddn_tail.py -s Sol             # Filter by system name
-    eddn_tail.py --beta             # Connect to beta EDDN
+    eddn-tail                        # Watch all messages
+    eddn-tail -f Scan                # Filter to Scan events
+    eddn-tail -f FSDJump             # Filter to FSDJump events
+    eddn-tail -u myuploaderid        # Filter by uploaderID
+    eddn-tail -s Sol                 # Filter by system name
+    eddn-tail --beta                 # Connect to beta EDDN
 
 Requirements:
-    pip install pyzmq textual rich
+    pip install .
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import signal
 import sys
 import zlib
 from datetime import datetime, timezone
 from typing import Optional
 
+import re
 import zmq
 
 try:
     from textual import on
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Horizontal, Vertical
+    from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.widgets import Footer, Header, Input, Static, DataTable
-    from textual.widgets.data_table import RowKey
 except ImportError:
-    print("eddn_tail requires textual and rich: pip install textual rich", file=sys.stderr)
+    print("eddn_tail requires pyzmq, textual, and rich: pip install .", file=sys.stderr)
     sys.exit(1)
 
 # EDDN endpoints
@@ -82,6 +81,8 @@ class EDDNReceiver:
             return json.loads(decompressed)
         except zmq.Again:
             return None
+        except zmq.ZMQError:
+            return None
         except (zlib.error, json.JSONDecodeError) as e:
             return {"_error": str(e)}
 
@@ -119,7 +120,7 @@ def extract_summary(msg: dict) -> dict:
     journal_ts = message.get("timestamp", "")
 
     # Schema short name
-    schema_short = SCHEMA_SHORT.get(schema_ref, schema_ref.rsplit("/", 1)[-1] if "/" in schema_ref else schema_ref)
+    schema_short = SCHEMA_SHORT.get(schema_ref, "/".join(schema_ref.rsplit("/", 2)[-2:]) if schema_ref.count("/") >= 2 else schema_ref)
 
     return {
         "schema": schema_short,
@@ -141,19 +142,39 @@ class EDDNTailApp(App):
 
     TITLE = "EDDN Tail"
     CSS = """
-    #detail-pane {
-        height: 40%;
+    #message-pane {
+        height: 1fr;
         border: solid $primary;
+        border-title-align: center;
+    }
+    #message-pane:focus-within {
+        border: heavy $accent;
     }
     #message-table {
-        height: 60%;
+        height: 1fr;
+    }
+    #detail-pane {
+        height: 1fr;
+        max-height: 40%;
+        border: solid $primary;
+        border-title-align: center;
+    }
+    #detail-pane:focus-within {
+        border: heavy $accent;
     }
     #filter-bar {
-        height: 3;
-        margin: 0 1;
+        dock: top;
+        height: auto;
+        padding: 0 2;
+        background: $surface;
+        border: solid $accent;
+        display: none;
     }
     #filter-input {
         width: 1fr;
+    }
+    #detail-content {
+        height: auto;
     }
     #stats-bar {
         height: 1;
@@ -193,10 +214,9 @@ class EDDNTailApp(App):
         self._show_detail = True
         self._msg_count = 0
         self._filtered_count = 0
-        self._start_time = datetime.now(timezone.utc)
+        self._app_start_time = datetime.now(timezone.utc)
         self._live_filter = ""
-        self._messages: list[dict] = []  # ring buffer
-        self._max_messages = 1000
+        self._messages: dict[str, dict] = {}  # keyed by row key for O(1) lookup
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -205,8 +225,9 @@ class EDDNTailApp(App):
                 placeholder="Filter: event, system, station, uploader, schema (regex supported)...",
                 id="filter-input",
             )
-        yield DataTable(id="message-table")
-        with Vertical(id="detail-pane"):
+        with Vertical(id="message-pane"):
+            yield DataTable(id="message-table")
+        with VerticalScroll(id="detail-pane"):
             yield Static("", id="detail-content")
         yield Static("", id="stats-bar")
         yield Footer()
@@ -219,12 +240,19 @@ class EDDNTailApp(App):
             "Time", "Schema", "Event", "System", "Station/Body", "Uploader", "Software"
         )
         table.zebra_stripes = True
+        table.focus()
+
+        # Filter input should only be reachable via /, not Tab
+        self.query_one("#filter-input", Input).can_focus = False
+
+        # Set initial border titles
+        self._update_pane_titles()
 
         # Start the receiver
         self._receiver = EDDNReceiver(self._endpoint)
         self.set_interval(0.05, self._poll_messages)
 
-        # Update stats
+        # Update stats and pane titles
         self.set_interval(1.0, self._update_stats)
 
     def on_unmount(self) -> None:
@@ -245,7 +273,6 @@ class EDDNTailApp(App):
             return False
         # Live filter (from input box) — match against multiple fields
         if self._live_filter:
-            import re
             try:
                 pattern = re.compile(self._live_filter, re.IGNORECASE)
             except re.error:
@@ -284,10 +311,9 @@ class EDDNTailApp(App):
                 self._filtered_count += 1
                 continue
 
-            # Store for detail view
-            self._messages.append(summary)
-            if len(self._messages) > self._max_messages:
-                self._messages.pop(0)
+            # Store for detail view (keyed by string for DataTable lookup)
+            msg_key = str(self._msg_count)
+            self._messages[msg_key] = summary
 
             # Format time
             ts = summary["gateway_ts"]
@@ -306,7 +332,6 @@ class EDDNTailApp(App):
             if summary["star_class"] and summary["event"] == "FSDJump":
                 location = f"[{summary['star_class']}]"
 
-            row_key = RowKey(self._msg_count)
             table.add_row(
                 time_str,
                 f"[{color}]{schema_label}[/{color}]",
@@ -315,7 +340,7 @@ class EDDNTailApp(App):
                 location,
                 summary["uploader_id"][:12],
                 summary["software"][:20],
-                key=row_key,
+                key=msg_key,
             )
 
             # Auto-scroll: move cursor to latest row
@@ -324,12 +349,61 @@ class EDDNTailApp(App):
             except Exception:
                 pass
 
+    def _refresh_table(self) -> None:
+        """Rebuild the table from stored messages, applying current filters."""
+        table = self.query_one("#message-table", DataTable)
+        table.clear()
+
+        live_filtered = 0
+        for msg_key, summary in self._messages.items():
+            if not self._matches_filters(summary):
+                live_filtered += 1
+                continue
+
+            ts = summary["gateway_ts"]
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                time_str = dt.strftime("%H:%M:%S")
+            except (ValueError, AttributeError):
+                time_str = ts[:8] if ts else "??"
+
+            schema_label = summary["schema"]
+            color = SCHEMA_COLORS.get(schema_label, "white")
+            location = summary["station"] or summary["body"]
+            if summary["star_class"] and summary["event"] == "FSDJump":
+                location = f"[{summary['star_class']}]"
+
+            table.add_row(
+                time_str,
+                f"[{color}]{schema_label}[/{color}]",
+                summary["event"],
+                summary["system"],
+                location,
+                summary["uploader_id"][:12],
+                summary["software"][:20],
+                key=msg_key,
+            )
+
+    def _update_pane_titles(self) -> None:
+        """Update border titles on both panes to reflect state."""
+        msg_pane = self.query_one("#message-pane", Vertical)
+        status_icon = "⏸" if self._paused else "▶"
+        endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
+        endpoint_name = endpoint_name[0] if endpoint_name else self._endpoint
+        has_filter = any([self._event_filter, self._uploader_filter, self._system_filter,
+                         self._station_filter, self._schema_filter, self._live_filter])
+        filter_tag = " [dim]\\[filtered][/dim]" if has_filter else ""
+        msg_pane.border_title = f"{status_icon} Messages - {'Paused' if self._paused else endpoint_name.title()}{filter_tag}"
+
+        detail_pane = self.query_one("#detail-pane", VerticalScroll)
+        detail_pane.border_title = "Message Detail"
+
     def _update_stats(self) -> None:
         """Update the stats bar."""
-        elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - self._app_start_time).total_seconds()
         rate = self._msg_count / elapsed if elapsed > 0 else 0
         stats = self.query_one("#stats-bar", Static)
-        shown = self._msg_count - self._filtered_count
+        shown = len(table.rows) if (table := self.query_one("#message-table", DataTable)) else 0
         status = "⏸ PAUSED" if self._paused else "▶ LIVE"
         filter_info = ""
         if any([self._event_filter, self._uploader_filter, self._system_filter,
@@ -342,45 +416,81 @@ class EDDNTailApp(App):
             f"Total: {self._msg_count} │ Shown: {shown} │ "
             f"Rate: {rate:.1f}/s{filter_info}"
         )
+        self._update_pane_titles()
 
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Show detail for selected row."""
         if not self._show_detail:
             return
-        # Find the message by row index
-        table = self.query_one("#message-table", DataTable)
-        row_index = event.cursor_row
-        if 0 <= row_index < len(self._messages):
-            summary = self._messages[row_index]
+        # Look up the message by its row key string
+        msg_key = event.row_key.value
+        if msg_key is not None and msg_key in self._messages:
+            summary = self._messages[msg_key]
             detail = self.query_one("#detail-content", Static)
+            # Escape Rich markup in JSON (brackets are interpreted as tags)
+            from rich.markup import escape  # noqa: E402 — avoid importing Rich at module load if only CLI is needed
             raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
             # Truncate very long messages
             if len(raw_json) > 5000:
                 raw_json = raw_json[:5000] + "\n... (truncated)"
-            detail.update(f"[bold]Detail:[/bold] {summary['event']} — {summary['system']}\n\n{raw_json}")
+            detail.update(f"[bold]Detail:[/bold] {escape(summary['event'])} — {escape(summary['system'])}\n\n{escape(raw_json)}")
+            # Scroll detail pane back to top for new selection
+            self.query_one("#detail-pane", VerticalScroll).scroll_home(animate=False)
 
     @on(Input.Changed)
     def on_filter_changed(self, event: Input.Changed) -> None:
-        """Update live filter from input."""
+        """Update live filter from input and re-apply to displayed messages."""
         self._live_filter = event.value.strip()
+        self._refresh_table()
+        self._update_pane_titles()
+
+    @on(Input.Blurred)
+    def on_filter_blur(self, event: Input.Blurred) -> None:
+        """When filter input loses focus, hide the filter bar and remove from Tab cycle."""
+        if event.input.id == "filter-input":
+            event.input.can_focus = False
+            self.query_one("#filter-bar").display = False
+
+    @on(Input.Submitted)
+    def on_filter_submitted(self, event: Input.Submitted) -> None:
+        """When Enter is pressed in the filter input, apply and close the popup."""
+        if event.input.id == "filter-input":
+            event.input.can_focus = False
+            self.query_one("#filter-bar").display = False
+            self.query_one("#message-table", DataTable).focus()
 
     def action_focus_filter(self) -> None:
-        self.query_one("#filter-input", Input).focus()
+        filter_bar = self.query_one("#filter-bar")
+        filter_bar.display = True
+        inp = self.query_one("#filter-input", Input)
+        inp.can_focus = True
+        inp.focus()
 
     def action_clear_filter(self) -> None:
-        inp = self.query_one("#filter-input", Input)
-        inp.value = ""
         self._live_filter = ""
+        self.query_one("#filter-input", Input).value = ""
+        self.query_one("#filter-bar").display = False
+        # Note: setting inp.value fires Input.Changed which calls _refresh_table
+        self._update_pane_titles()
         self.query_one("#message-table", DataTable).focus()
 
     def action_toggle_pause(self) -> None:
         self._paused = not self._paused
+        self._update_pane_titles()
 
     def action_toggle_detail(self) -> None:
         self._show_detail = not self._show_detail
-        detail = self.query_one("#detail-pane", Vertical)
+        detail = self.query_one("#detail-pane", VerticalScroll)
         detail.display = self._show_detail
+        # When detail is hidden, let messages pane take the full height
+        msg_pane = self.query_one("#message-pane", Vertical)
+        if self._show_detail:
+            msg_pane.styles.height = "1fr"
+            detail.styles.max_height = "40%"
+        else:
+            msg_pane.styles.height = "1fr"
+            detail.styles.max_height = "0%"
 
     def action_cursor_up(self) -> None:
         table = self.query_one("#message-table", DataTable)
@@ -397,19 +507,20 @@ class EDDNTailApp(App):
             pass
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser for eddn-tail."""
     parser = argparse.ArgumentParser(
         description="EDDN Tail — monitor the EDDN live stream in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  eddn_tail.py                          Watch all EDDN messages
-  eddn_tail.py -f Scan                  Filter to Scan events only
-  eddn_tail.py -f FSDJump               Filter to FSDJump events
-  eddn_tail.py -u my_uploader_id        Filter by uploaderID
-  eddn_tail.py -s Sol                   Filter by system name
-  eddn_tail.py --beta                   Connect to beta EDDN
-  eddn_tail.py -f Scan -s Sol           Combine filters (AND logic)
+  eddn-tail                            Watch all EDDN messages
+  eddn-tail -f Scan                    Filter to Scan events only
+  eddn-tail -f FSDJump                 Filter to FSDJump events
+  eddn-tail -u my_uploader_id          Filter by uploaderID
+  eddn-tail -s Sol                     Filter by system name
+  eddn-tail --beta                     Connect to beta EDDN
+  eddn-tail -f Scan -s Sol             Combine filters (AND logic)
 
 In-app keybindings:
   /       Focus the filter input (live regex filter)
@@ -428,7 +539,15 @@ In-app keybindings:
     parser.add_argument("-S", "--schema", default="", help="Filter by schema (e.g. journal/1, commodity/3)")
     parser.add_argument("--beta", action="store_true", help="Connect to beta EDDN endpoint")
     parser.add_argument("--dev", action="store_true", help="Connect to dev EDDN endpoint")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
+
+    if args.beta and args.dev:
+        parser.error("--beta and --dev are mutually exclusive")
 
     if args.beta:
         endpoint = EDDN_ENDPOINTS["beta"]
