@@ -17,7 +17,6 @@ from eddn_tail import (
     SCHEMA_SHORT,
     build_parser,
     extract_summary,
-    main,
 )
 
 
