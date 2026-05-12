@@ -4,6 +4,8 @@ A KinesisTail-like TUI for monitoring the Elite Dangerous Data Network (EDDN) li
 
 Connects to EDDN's ZeroMQ PUB/SUB relay and displays all messages flowing through the network in real-time — useful for verifying your own submissions or just watching the galaxy's data flow.
 
+![EDDN Tail Demo](demo.gif)
+
 ## Installation
 
 ```bash
