@@ -39,6 +39,8 @@ jobs:
 
   pyinstaller:
     needs: release
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
