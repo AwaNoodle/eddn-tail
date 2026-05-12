@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write  # for PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-release@release/v1
+        with:
+          trusted-publishing: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  pyinstaller:
+    needs: release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux
+          - os: macos-latest
+            suffix: macos
+          - os: windows-latest
+            suffix: windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install project
+        run: pip install .
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build standalone binary
+        run: |
+          pyinstaller --onefile --name eddn-tail-${{ matrix.suffix }} eddn_tail.py
+
+      - name: Upload binary to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/eddn-tail-${{ matrix.suffix }}*
