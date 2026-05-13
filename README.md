@@ -33,9 +33,6 @@ eddn-tail
 # Filter to Scan events only
 eddn-tail -f Scan
 
-# Filter to your uploaderID (see your own submissions)
-eddn-tail -u <your_uploader_id>
-
 # Filter by system name
 eddn-tail -s Sol
 
@@ -63,6 +60,7 @@ eddn-tail --dev
 | `Esc` | Clear filter |
 | `p` | Pause/resume stream |
 | `d` | Toggle detail pane |
+| `e` | Export selected message JSON to file |
 | `↑/↓` | Navigate rows |
 | `Enter` | Show full message detail |
 | `q` | Quit |
@@ -77,14 +75,11 @@ EDDN is a publish/subscribe message relay. When tools (like EDMC, EDDI, or Decky
 | Beta | `https://beta.eddn.edcd.io:4431/upload/` | `tcp://beta.eddn.edcd.io:9510` |
 | Dev | `https://dev.eddn.edcd.io:4432/upload/` | `tcp://dev.eddn.edcd.io:9520` |
 
-### Verifying your own submissions
+### About the uploaderID column
 
-1. Start `eddn-tail -u <your_uploader_id>` on any machine with internet access
-2. Run your EDDN sender tool (EDMC, Decky plugin, etc.)
-3. Watch the TUI — your submissions appear in real-time
-4. Select any row to inspect the full JSON payload
+EDDN relays do not broadcast the original uploaderID. The relay hashes it with a rotating nonce every 3 minutes (`SHA-1(nonce + "-" + uploaderID)`) before broadcasting, so the values shown in the Uploader column are 40-character hex strings — not commander names. Because the hash changes every 3 minutes, there is no reliable way to filter by uploader from the CLI. Use the in-app live filter (`/`) for short-term substring matching on any visible column value.
 
-This confirms **end-to-end delivery**: your tool → EDDN upload → EDDN relay → your listener.
+To inspect a message's full JSON payload, select a row and press Enter, or press `e` to export it to a file.
 
 ## EDDN message format
 
@@ -94,7 +89,7 @@ Messages on the wire are zlib-compressed JSON with this structure:
 {
   "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
   "header": {
-    "uploaderID": "...",
+    "uploaderID": "<40-char SHA-1 hash, rotates every 3 min>",
     "softwareName": "...",
     "softwareVersion": "...",
     "gameversion": "...",

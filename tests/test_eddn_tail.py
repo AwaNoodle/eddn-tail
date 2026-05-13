@@ -14,6 +14,7 @@ from eddn_tail import (
     EDDNReceiver,
     EDDNTailApp,
     SCHEMA_COLORS,
+    SCHEMA_EVENT,
     SCHEMA_SHORT,
     build_parser,
     extract_summary,
@@ -89,8 +90,8 @@ class TestExtractSummary:
                 "gatewayTimestamp": "2026-05-10T23:00:00Z",
             },
             "message": {
-                "SystemName": "Lave",
-                "StationName": "Lave Station",
+                "systemName": "Lave",
+                "stationName": "Lave Station",
                 "timestamp": "2026-05-10T22:59:00Z",
             },
         }
@@ -98,7 +99,7 @@ class TestExtractSummary:
         assert s["schema"] == "commodity/3"
         assert s["system"] == "Lave"
         assert s["station"] == "Lave Station"
-        assert s["event"] == ""
+        assert s["event"] == "commodity"  # derived from schema
 
     def test_outfitting_message(self):
         msg = {
@@ -110,8 +111,8 @@ class TestExtractSummary:
                 "gatewayTimestamp": "2026-05-10T23:10:00Z",
             },
             "message": {
-                "SystemName": "Shinrarta Dezhra",
-                "StationName": "Jameson Memorial",
+                "systemName": "Shinrarta Dezhra",
+                "stationName": "Jameson Memorial",
             },
         }
         s = extract_summary(msg)
@@ -198,15 +199,91 @@ class TestExtractSummary:
         s = extract_summary(msg)
         assert s["system"] == "Sol"
 
-    def test_systemname_fallback(self):
-        """When only SystemName exists, it is used."""
+    def test_starsystem_preferred_over_lowercase_systemname(self):
+        """When both StarSystem and systemName exist, StarSystem wins."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+            "header": {},
+            "message": {"StarSystem": "Sol", "systemName": "Lave"},
+        }
+        s = extract_summary(msg)
+        assert s["system"] == "Sol"
+
+    def test_capitalized_systemname_preferred_over_lowercase(self):
+        """SystemName (capitalized) is checked before systemName (lowercase)."""
         msg = {
             "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
             "header": {},
-            "message": {"SystemName": "Lave"},
+            "message": {"SystemName": "Lave", "systemName": "Deciat"},
         }
         s = extract_summary(msg)
         assert s["system"] == "Lave"
+
+    def test_systemname_fallback(self):
+        """When only systemName (lowercase) exists, it is used."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
+            "header": {},
+            "message": {"systemName": "Lave"},
+        }
+        s = extract_summary(msg)
+        assert s["system"] == "Lave"
+
+    def test_derived_event_commodity(self):
+        """commodity/3 messages derive event='commodity' from schema."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
+            "header": {},
+            "message": {"systemName": "Lave", "stationName": "Lave Station"},
+        }
+        s = extract_summary(msg)
+        assert s["event"] == "commodity"
+        assert s["system"] == "Lave"
+        assert s["station"] == "Lave Station"
+
+    def test_derived_event_outfitting(self):
+        """outfitting/2 messages derive event='outfitting' from schema."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/outfitting/2",
+            "header": {},
+            "message": {"systemName": "Shinrarta Dezhra", "stationName": "Jameson Memorial"},
+        }
+        s = extract_summary(msg)
+        assert s["event"] == "outfitting"
+        assert s["system"] == "Shinrarta Dezhra"
+        assert s["station"] == "Jameson Memorial"
+
+    def test_derived_event_shipyard(self):
+        """shipyard/2 messages derive event='shipyard' from schema."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/shipyard/2",
+            "header": {},
+            "message": {"systemName": "Shinrarta Dezhra", "stationName": "Jameson Memorial"},
+        }
+        s = extract_summary(msg)
+        assert s["event"] == "shipyard"
+        assert s["system"] == "Shinrarta Dezhra"
+        assert s["station"] == "Jameson Memorial"
+
+    def test_journal_event_takes_priority_over_derived(self):
+        """Journal messages keep their own event field, not overridden by schema."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+            "header": {},
+            "message": {"event": "Scan", "StarSystem": "Sol"},
+        }
+        s = extract_summary(msg)
+        assert s["event"] == "Scan"  # not derived from schema
+
+    def test_unknown_schema_no_derived_event(self):
+        """Unknown schema with no event field yields empty string."""
+        msg = {
+            "$schemaRef": "https://eddn.edcd.io/schemas/fuel/1",
+            "header": {},
+            "message": {},
+        }
+        s = extract_summary(msg)
+        assert s["event"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +408,8 @@ class TestMatchesFilters:
                 "gatewayTimestamp": "2026-05-10T23:00:00Z",
             },
             "message": {
-                "SystemName": "Lave",
-                "StationName": "Lave Station",
+                "systemName": "Lave",
+                "stationName": "Lave Station",
             },
         })
 
@@ -349,11 +426,6 @@ class TestMatchesFilters:
     def test_event_filter_substring(self):
         app = self._make_app(event_filter="Sc")
         assert app._matches_filters(self._scan_summary()) is True
-
-    def test_uploader_filter(self):
-        app = self._make_app(uploader_filter="cmdr1")
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is False
 
     def test_system_filter(self):
         app = self._make_app(system_filter="sol")
@@ -420,6 +492,26 @@ class TestMatchesFilters:
         })
         assert app._matches_filters(empty_summary) is False
 
+    def test_commodity_event_matches_commodity_filter(self):
+        """A commodity/3 message with derived event='commodity' matches 'commodity' filter."""
+        app = self._make_app(event_filter="commodity")
+        commodity_summary = extract_summary({
+            "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
+            "header": {"uploaderID": "trader"},
+            "message": {"systemName": "Lave", "stationName": "Lave Station"},
+        })
+        assert app._matches_filters(commodity_summary) is True
+
+    def test_commodity_event_does_not_match_scan_filter(self):
+        """A commodity/3 message with derived event should not match 'Scan' filter."""
+        app = self._make_app(event_filter="scan")
+        commodity_summary = extract_summary({
+            "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
+            "header": {"uploaderID": "trader"},
+            "message": {"systemName": "Lave", "stationName": "Lave Station"},
+        })
+        assert app._matches_filters(commodity_summary) is False
+
 
 # ---------------------------------------------------------------------------
 # 4. main() argument parsing
@@ -439,7 +531,6 @@ class TestMainArgParsing:
     def test_default_args(self):
         args = self._parse_args([])
         assert args.event == ""
-        assert args.uploader == ""
         assert args.system == ""
         assert args.station == ""
         assert args.schema == ""
@@ -471,13 +562,11 @@ class TestMainArgParsing:
     def test_all_filter_flags(self):
         args = self._parse_args([
             "-f", "FSDJump",
-            "-u", "cmdr1",
             "-s", "Deciat",
             "-t", "Farseer Inc",
             "-S", "journal/1",
         ])
         assert args.event == "FSDJump"
-        assert args.uploader == "cmdr1"
         assert args.system == "Deciat"
         assert args.station == "Farseer Inc"
         assert args.schema == "journal/1"
@@ -511,3 +600,11 @@ class TestConstants:
     def test_endpoints_format(self):
         for key, url in EDDN_ENDPOINTS.items():
             assert url.startswith("tcp://"), f"{key} endpoint doesn't start with tcp://"
+
+    def test_schema_event_keys_are_non_journal_schemas(self):
+        """SCHEMA_EVENT covers non-journal schemas that lack an event field."""
+        assert set(SCHEMA_EVENT.keys()) == {"commodity/3", "outfitting/2", "shipyard/2"}
+
+    def test_schema_event_values_are_lowercase(self):
+        for val in SCHEMA_EVENT.values():
+            assert val == val.lower()

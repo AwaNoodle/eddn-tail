@@ -9,7 +9,6 @@ Usage:
     eddn-tail                        # Watch all messages
     eddn-tail -f Scan                # Filter to Scan events
     eddn-tail -f FSDJump             # Filter to FSDJump events
-    eddn-tail -u myuploaderid        # Filter by uploaderID
     eddn-tail -s Sol                 # Filter by system name
     eddn-tail --beta                 # Connect to beta EDDN
 
@@ -21,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import zlib
 from datetime import datetime, timezone
@@ -52,6 +52,13 @@ SCHEMA_SHORT = {
     "https://eddn.edcd.io/schemas/commodity/3": "commodity/3",
     "https://eddn.edcd.io/schemas/outfitting/2": "outfitting/2",
     "https://eddn.edcd.io/schemas/shipyard/2": "shipyard/2",
+}
+
+# Derived event names for non-journal schemas (they lack an "event" field)
+SCHEMA_EVENT = {
+    "commodity/3": "commodity",
+    "outfitting/2": "outfitting",
+    "shipyard/2": "shipyard",
 }
 
 # Color map for schemas
@@ -97,12 +104,17 @@ def extract_summary(msg: dict) -> dict:
     message = msg.get("message", {})
     schema_ref = msg.get("$schemaRef", "")
 
-    # Extract event type
-    event = message.get("event", "")
+    # Schema short name (needed for derived event names)
+    schema_short = SCHEMA_SHORT.get(schema_ref, "/".join(schema_ref.rsplit("/", 2)[-2:]) if schema_ref.count("/") >= 2 else schema_ref)
 
-    # Extract system/station
-    system = message.get("StarSystem", message.get("SystemName", ""))
-    station = message.get("StationName", "")
+    # Extract event type — for journal schemas, use the event field;
+    # for non-journal schemas, derive from schema name
+    event = message.get("event", "") or SCHEMA_EVENT.get(schema_short, "")
+
+    # Extract system/station — journal uses StarSystem/StationName (capitalized),
+    # non-journal schemas use systemName/stationName (lowercase)
+    system = message.get("StarSystem", message.get("SystemName", message.get("systemName", "")))
+    station = message.get("StationName", message.get("stationName", ""))
 
     # For Scan events, use BodyName
     body = message.get("BodyName", "")
@@ -118,9 +130,6 @@ def extract_summary(msg: dict) -> dict:
     # Timestamp
     gateway_ts = header.get("gatewayTimestamp", "")
     journal_ts = message.get("timestamp", "")
-
-    # Schema short name
-    schema_short = SCHEMA_SHORT.get(schema_ref, "/".join(schema_ref.rsplit("/", 2)[-2:]) if schema_ref.count("/") >= 2 else schema_ref)
 
     return {
         "schema": schema_short,
@@ -189,6 +198,7 @@ class EDDNTailApp(App):
         Binding("escape", "clear_filter", "Clear Filter", show=True),
         Binding("p", "toggle_pause", "Pause/Resume", show=True),
         Binding("d", "toggle_detail", "Toggle Detail", show=True),
+        Binding("e", "export_json", "Export JSON", show=True),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
     ]
@@ -197,7 +207,6 @@ class EDDNTailApp(App):
         self,
         endpoint: str = EDDN_ENDPOINTS["live"],
         event_filter: str = "",
-        uploader_filter: str = "",
         system_filter: str = "",
         station_filter: str = "",
         schema_filter: str = "",
@@ -205,7 +214,6 @@ class EDDNTailApp(App):
         super().__init__()
         self._endpoint = endpoint
         self._event_filter = event_filter.lower()
-        self._uploader_filter = uploader_filter.lower()
         self._system_filter = system_filter.lower()
         self._station_filter = station_filter.lower()
         self._schema_filter = schema_filter.lower()
@@ -262,8 +270,6 @@ class EDDNTailApp(App):
     def _matches_filters(self, summary: dict) -> bool:
         """Check if a message matches all configured filters."""
         if self._event_filter and self._event_filter not in summary["event"].lower():
-            return False
-        if self._uploader_filter and self._uploader_filter not in summary["uploader_id"].lower():
             return False
         if self._system_filter and self._system_filter not in summary["system"].lower():
             return False
@@ -390,7 +396,7 @@ class EDDNTailApp(App):
         status_icon = "⏸" if self._paused else "▶"
         endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
         endpoint_name = endpoint_name[0] if endpoint_name else self._endpoint
-        has_filter = any([self._event_filter, self._uploader_filter, self._system_filter,
+        has_filter = any([self._event_filter, self._system_filter,
                          self._station_filter, self._schema_filter, self._live_filter])
         filter_tag = " [dim]\\[filtered][/dim]" if has_filter else ""
         msg_pane.border_title = f"{status_icon} Messages - {'Paused' if self._paused else endpoint_name.title()}{filter_tag}"
@@ -406,7 +412,7 @@ class EDDNTailApp(App):
         shown = len(table.rows) if (table := self.query_one("#message-table", DataTable)) else 0
         status = "⏸ PAUSED" if self._paused else "▶ LIVE"
         filter_info = ""
-        if any([self._event_filter, self._uploader_filter, self._system_filter,
+        if any([self._event_filter, self._system_filter,
                 self._station_filter, self._schema_filter, self._live_filter]):
             filter_info = f" | Filters: {self._filtered_count} dropped"
         endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
@@ -431,10 +437,8 @@ class EDDNTailApp(App):
             # Escape Rich markup in JSON (brackets are interpreted as tags)
             from rich.markup import escape  # noqa: E402 — avoid importing Rich at module load if only CLI is needed
             raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
-            # Truncate very long messages
-            if len(raw_json) > 5000:
-                raw_json = raw_json[:5000] + "\n... (truncated)"
-            detail.update(f"[bold]Detail:[/bold] {escape(summary['event'])} — {escape(summary['system'])}\n\n{escape(raw_json)}")
+            # Show only the raw JSON — no header, no truncation
+            detail.update(escape(raw_json))
             # Scroll detail pane back to top for new selection
             self.query_one("#detail-pane", VerticalScroll).scroll_home(animate=False)
 
@@ -492,6 +496,31 @@ class EDDNTailApp(App):
             msg_pane.styles.height = "1fr"
             detail.styles.max_height = "0%"
 
+    def action_export_json(self) -> None:
+        """Export the currently selected message's JSON to a file."""
+        table = self.query_one("#message-table", DataTable)
+        try:
+            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+            msg_key = cell_key.row_key.value
+        except Exception:
+            self.notify("No row selected", severity="warning")
+            return
+        if msg_key is not None and msg_key in self._messages:
+            summary = self._messages[msg_key]
+            raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
+            # Write to eddn_export_<timestamp>.json in current directory
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"eddn_export_{ts}.json"
+            filepath = os.path.join(os.getcwd(), filename)
+            try:
+                with open(filepath, "w") as f:
+                    f.write(raw_json)
+                self.notify(f"Exported to {filepath}")
+            except OSError as exc:
+                self.notify(f"Export failed: {exc}", severity="error")
+        else:
+            self.notify("No message at selected row", severity="warning")
+
     def action_cursor_up(self) -> None:
         table = self.query_one("#message-table", DataTable)
         try:
@@ -517,23 +546,29 @@ Examples:
   eddn-tail                            Watch all EDDN messages
   eddn-tail -f Scan                    Filter to Scan events only
   eddn-tail -f FSDJump                 Filter to FSDJump events
-  eddn-tail -u my_uploader_id          Filter by uploaderID
   eddn-tail -s Sol                     Filter by system name
   eddn-tail --beta                     Connect to beta EDDN
   eddn-tail -f Scan -s Sol             Combine filters (AND logic)
+
+Note on uploaderID:
+  EDDN relays hash uploaderID values before broadcast (SHA-1 with a
+  rotating nonce that changes every 3 minutes), so the Uploader column
+  shows 40-character hex strings — not commander names. Since the hash
+  rotates, -u filtering is unreliable and has been removed. Use the
+  live filter (/) for short-term matching on any column value.
 
 In-app keybindings:
   /       Focus the filter input (live regex filter)
   Esc     Clear filter
   p       Pause/resume stream
   d       Toggle detail pane
+  e       Export selected message JSON to file
   ↑/↓     Navigate rows
   Enter   Show message detail
   q       Quit
 """,
     )
     parser.add_argument("-f", "--event", default="", help="Filter by journal event name (e.g. Scan, FSDJump)")
-    parser.add_argument("-u", "--uploader", default="", help="Filter by uploaderID")
     parser.add_argument("-s", "--system", default="", help="Filter by system name")
     parser.add_argument("-t", "--station", default="", help="Filter by station name")
     parser.add_argument("-S", "--schema", default="", help="Filter by schema (e.g. journal/1, commodity/3)")
@@ -559,7 +594,6 @@ def main():
     app = EDDNTailApp(
         endpoint=endpoint,
         event_filter=args.event,
-        uploader_filter=args.uploader,
         system_filter=args.system,
         station_filter=args.station,
         schema_filter=args.schema,
