@@ -719,9 +719,6 @@ class TestClearEvents:
         titles_called = []
         stats_called = []
 
-        original_update_pane_titles = app._update_pane_titles
-        original_update_stats = app._update_stats
-
         app._update_pane_titles = lambda: titles_called.append(True)
         app._update_stats = lambda: stats_called.append(True)
         app.query_one = lambda selector, type=None: _FakeWidget()
