@@ -199,6 +199,7 @@ class EDDNTailApp(App):
         Binding("p", "toggle_pause", "Pause/Resume", show=True),
         Binding("d", "toggle_detail", "Toggle Detail", show=True),
         Binding("e", "export_json", "Export JSON", show=True),
+        Binding("ctrl+l", "clear_events", "Clear Events", show=True),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
     ]
@@ -496,6 +497,18 @@ class EDDNTailApp(App):
             msg_pane.styles.height = "1fr"
             detail.styles.max_height = "0%"
 
+    def action_clear_events(self) -> None:
+        """Clear all received events and reset the app to a clean state."""
+        self._messages.clear()
+        self._msg_count = 0
+        self._filtered_count = 0
+        self._app_start_time = datetime.now(timezone.utc)
+        self.query_one("#message-table", DataTable).clear()
+        self.query_one("#detail-content", Static).update("")
+        self._update_pane_titles()
+        self._update_stats()
+        self.notify("Events cleared")
+
     def action_export_json(self) -> None:
         """Export the currently selected message's JSON to a file."""
         table = self.query_one("#message-table", DataTable)
@@ -563,6 +576,7 @@ In-app keybindings:
   p       Pause/resume stream
   d       Toggle detail pane
   e       Export selected message JSON to file
+  Ctrl+L  Clear all received events
   ↑/↓     Navigate rows
   Enter   Show message detail
   q       Quit

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 import json
 import time
 import zlib
@@ -608,3 +609,136 @@ class TestConstants:
     def test_schema_event_values_are_lowercase(self):
         for val in SCHEMA_EVENT.values():
             assert val == val.lower()
+
+
+# ---------------------------------------------------------------------------
+# 6. action_clear_events()
+# ---------------------------------------------------------------------------
+
+class TestClearEvents:
+    """Tests for the action_clear_events method on EDDNTailApp."""
+
+    def _make_app(self):
+        return EDDNTailApp(endpoint="tcp://localhost:9999")
+
+    def test_clear_events_resets_state(self):
+        """Clearing events empties _messages and resets counters."""
+        app = self._make_app()
+        # Populate state
+        app._messages = {
+            "1": {"event": "Scan", "system": "Sol", "raw": {}},
+            "2": {"event": "FSDJump", "system": "Deciat", "raw": {}},
+        }
+        app._msg_count = 10
+        app._filtered_count = 3
+
+        # Only test the pure-state logic — mock out widget calls
+        app.query_one = lambda selector, type=None: _FakeWidget()
+        app.notify = lambda msg: None
+
+        app.action_clear_events()
+
+        assert app._messages == {}
+        assert app._msg_count == 0
+        assert app._filtered_count == 0
+
+    def test_clear_events_after_clear_rate_resets(self):
+        """After clearing, _app_start_time is updated so rate is sensible."""
+        app = self._make_app()
+        old_start = app._app_start_time
+        # Simulate some time passing
+        app._app_start_time = old_start - timedelta(hours=1)
+
+        app.query_one = lambda selector, type=None: _FakeWidget()
+        app.notify = lambda msg: None
+
+        app.action_clear_events()
+
+        # _app_start_time should be newer than the old value
+        assert app._app_start_time > old_start - timedelta(hours=1)
+        # Elapsed time since reset should be near zero (< 2s tolerance)
+        elapsed = (datetime.now(timezone.utc) - app._app_start_time).total_seconds()
+        assert elapsed < 2.0
+
+    def test_clear_events_clears_table_and_detail(self):
+        """Clearing events calls clear() on DataTable and update("") on detail."""
+        app = self._make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app._msg_count = 5
+
+        table_cleared = []
+        detail_cleared = []
+
+        class FakeTable:
+            rows = []
+            def clear(self):
+                table_cleared.append(True)
+
+        class FakeStatic:
+            border_title = ""
+            def update(self, text):
+                detail_cleared.append(text)
+
+        def fake_query_one(selector, type=None):
+            if selector == "#message-table":
+                return FakeTable()
+            elif selector == "#detail-content":
+                return FakeStatic()
+            return _FakeWidget()
+
+        app.query_one = fake_query_one
+        app.notify = lambda msg: None
+
+        app.action_clear_events()
+
+        assert app._messages == {}
+        assert app._msg_count == 0
+        assert len(table_cleared) == 1
+        assert detail_cleared == [""]
+
+    def test_clear_events_calls_notify(self):
+        """Clearing events calls notify with the expected message."""
+        app = self._make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app.query_one = lambda selector, type=None: _FakeWidget()
+
+        notified = []
+        app.notify = lambda msg: notified.append(msg)
+
+        app.action_clear_events()
+
+        assert notified == ["Events cleared"]
+
+    def test_clear_events_updates_pane_titles(self):
+        """After clearing, _update_pane_titles and _update_stats are called."""
+        app = self._make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app._msg_count = 5
+
+        # Track that _update_pane_titles and _update_stats were called
+        titles_called = []
+        stats_called = []
+
+        original_update_pane_titles = app._update_pane_titles
+        original_update_stats = app._update_stats
+
+        app._update_pane_titles = lambda: titles_called.append(True)
+        app._update_stats = lambda: stats_called.append(True)
+        app.query_one = lambda selector, type=None: _FakeWidget()
+        app.notify = lambda msg: None
+
+        app.action_clear_events()
+
+        assert len(titles_called) == 1
+        assert len(stats_called) == 1
+
+
+class _FakeWidget:
+    """Minimal stand-in for Textual widgets used in unit tests."""
+    def clear(self):
+        pass
+    def update(self, text=""):
+        pass
+    rows = []
+    border_title = ""
+    display = True

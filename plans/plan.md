@@ -20,3 +20,13 @@
    - Removed `-u`/`--uploader` CLI flag as it's fundamentally unreliable
    - Updated help text and README to explain the situation
    - Users can still use the live filter (`/`) for short-term matching
+
+### 2026-05-14 — Round 4
+7. **Clear events feature** → Add `Ctrl+L` keybinding + `action_clear_events()` to reset all received events to a clean state:
+   - Clears `_messages` dict, resets `_msg_count` and `_filtered_count` to 0
+   - Resets `_app_start_time` so rate counter restarts from scratch
+   - Clears `DataTable` rows and detail pane content
+   - Updates pane titles and stats bar
+   - Shows `notify("Events cleared")` feedback
+   - No confirmation dialog (consistent with existing single-press action pattern)
+   - `Ctrl+L` chosen as standard terminal clear convention; avoids existing bindings; requires Ctrl modifier so not easily triggered accidentally

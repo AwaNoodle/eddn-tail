@@ -61,6 +61,7 @@ eddn-tail --dev
 | `p` | Pause/resume stream |
 | `d` | Toggle detail pane |
 | `e` | Export selected message JSON to file |
+| `Ctrl+L` | Clear all received events |
 | `↑/↓` | Navigate rows |
 | `Enter` | Show full message detail |
 | `q` | Quit |
