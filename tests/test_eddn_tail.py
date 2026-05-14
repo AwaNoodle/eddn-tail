@@ -518,6 +518,76 @@ class TestMatchesFilters:
 
 
 # ---------------------------------------------------------------------------
+# 3b. _matches_cli_filters() and _matches_live_filter()
+# ---------------------------------------------------------------------------
+
+class TestFilterSplit:
+    """Tests for the split filter methods (CLI vs live)."""
+
+    def _make_app(self, **kwargs):
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", **kwargs)
+        return app
+
+    def _scan_summary(self):
+        return extract_summary({
+            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+            "header": {
+                "uploaderID": "cmdr1",
+                "softwareName": "EDMC",
+                "softwareVersion": "5.0",
+                "gatewayTimestamp": "2026-05-10T22:36:19Z",
+            },
+            "message": {
+                "event": "Scan",
+                "StarSystem": "Sol",
+                "BodyName": "Earth",
+            },
+        })
+
+    def test_cli_filter_matches(self):
+        app = self._make_app(event_filter="scan")
+        assert app._matches_cli_filters(self._scan_summary()) is True
+
+    def test_cli_filter_rejects(self):
+        app = self._make_app(event_filter="fsdjump")
+        assert app._matches_cli_filters(self._scan_summary()) is False
+
+    def test_live_filter_matches(self):
+        app = self._make_app()
+        app._live_filter = "sol"
+        app._live_filter_pattern = app._compile_live_filter()
+        assert app._matches_live_filter(self._scan_summary()) is True
+
+    def test_live_filter_rejects(self):
+        app = self._make_app()
+        app._live_filter = "zzz"
+        app._live_filter_pattern = app._compile_live_filter()
+        assert app._matches_live_filter(self._scan_summary()) is False
+
+    def test_live_filter_empty_passes(self):
+        app = self._make_app()
+        # No live filter set
+        assert app._matches_live_filter(self._scan_summary()) is True
+
+    def test_combined_still_competent(self):
+        """_matches_filters still checks both CLI and live filters."""
+        app = self._make_app(event_filter="scan")
+        app._live_filter = "sol"
+        app._live_filter_pattern = app._compile_live_filter()
+        assert app._matches_filters(self._scan_summary()) is True
+
+    def test_cli_pass_live_fail_means_hidden(self):
+        """A message passing CLI filter but failing live filter should
+        still be stored (just not displayed)."""
+        app = self._make_app(event_filter="scan")
+        app._live_filter = "zzz"
+        app._live_filter_pattern = app._compile_live_filter()
+        assert app._matches_cli_filters(self._scan_summary()) is True
+        assert app._matches_live_filter(self._scan_summary()) is False
+        assert app._matches_filters(self._scan_summary()) is False
+
+
+# ---------------------------------------------------------------------------
 # 4. main() argument parsing
 # ---------------------------------------------------------------------------
 

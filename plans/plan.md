@@ -21,7 +21,17 @@
    - Updated help text and README to explain the situation
    - Users can still use the live filter (`/`) for short-term matching
 
-### 2026-05-14 — Round 4
+### 2026-05-14 — Round 4 — Lint fix
+8. **Ruff lint errors (unused variables)** → Removed `original_update_pane_titles` and `original_update_stats` assignments that were assigned but never used in `TestClearEvents`
+
+### 2026-05-14 — Round 5 — Refactoring & review-driven fixes
+9. **Regex recompiled every message** → Added `_live_filter_pattern` cached field and `_compile_live_filter()` method; `on_filter_changed` and `action_clear_filter` update the cached pattern; `_matches_filters` uses it instead of calling `re.compile()` per invocation
+10. **Duplicated ZMQ test helpers** → Replaced `_bind_pub()` + `TestEDDNReceiver._setup_receiver()` with single `_bind_zmq_pub()` helper; `_setup_receiver` now delegates to it
+
+### 2026-05-14 — Round 6 — Blocker fixes from code review
+11. **Live filter permanently discarded messages** → Split `_matches_filters` into `_matches_cli_filters` (permanent startup filters) and `_matches_live_filter` (interactive filter). `_poll_messages` now stores all CLI-filtered messages; only skips display for live filter mismatches. Clearing/widening the live filter reveals previously hidden messages via `_refresh_table`.
+12. **Auto-scroll prevented manual navigation** → Changed unconditional `move_cursor` to only auto-scroll when cursor is within 2 rows of the bottom (`cursor_row >= total_rows - 2`)
+13. **`_filtered_count` never decreased** → Stats bar now dynamically computes total dropped = CLI-dropped `_filtered_count` + live-filtered messages currently in `_messages`. Clearing/widening the live filter reduces the live-dropped count immediately.
 7. **Clear events feature** → Add `Ctrl+L` keybinding + `action_clear_events()` to reset all received events to a clean state:
    - Clears `_messages` dict, resets `_msg_count` and `_filtered_count` to 0
    - Resets `_app_start_time` so rate counter restarts from scratch

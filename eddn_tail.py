@@ -278,8 +278,12 @@ class EDDNTailApp(App):
         except re.error:
             return None
 
-    def _matches_filters(self, summary: dict) -> bool:
-        """Check if a message matches all configured filters."""
+    def _matches_cli_filters(self, summary: dict) -> bool:
+        """Check if a message matches the CLI filters (--event, --system, etc.).
+
+        These are static filters set at startup — messages that fail
+        are permanently discarded and never stored.
+        """
         if self._event_filter and self._event_filter not in summary["event"].lower():
             return False
         if self._system_filter and self._system_filter not in summary["system"].lower():
@@ -288,19 +292,28 @@ class EDDNTailApp(App):
             return False
         if self._schema_filter and self._schema_filter not in summary["schema"].lower():
             return False
-        # Live filter (from input box) — match against multiple fields
-        if self._live_filter:
-            haystack = " ".join([
-                summary["event"], summary["system"], summary["station"],
-                summary["body"], summary["uploader_id"], summary["schema"],
-                summary["software"],
-            ]).lower()
-            if self._live_filter_pattern:
-                if not self._live_filter_pattern.search(haystack):
-                    return False
-            elif self._live_filter.lower() not in haystack:
-                return False
         return True
+
+    def _matches_live_filter(self, summary: dict) -> bool:
+        """Check if a message matches the live (interactive) filter.
+
+        The live filter changes at runtime, so messages that don't match
+        are still stored for later retrieval when the filter changes.
+        """
+        if not self._live_filter:
+            return True
+        haystack = " ".join([
+            summary["event"], summary["system"], summary["station"],
+            summary["body"], summary["uploader_id"], summary["schema"],
+            summary["software"],
+        ]).lower()
+        if self._live_filter_pattern:
+            return self._live_filter_pattern.search(haystack) is not None
+        return self._live_filter.lower() in haystack
+
+    def _matches_filters(self, summary: dict) -> bool:
+        """Check if a message matches all configured filters."""
+        return self._matches_cli_filters(summary) and self._matches_live_filter(summary)
 
     def _poll_messages(self) -> None:
         """Poll for new messages and add them to the table."""
@@ -320,13 +333,15 @@ class EDDNTailApp(App):
             self._msg_count += 1
             summary = extract_summary(msg)
 
-            if not self._matches_filters(summary):
+            if not self._matches_cli_filters(summary):
                 self._filtered_count += 1
                 continue
 
             # Store for detail view (keyed by string for DataTable lookup)
             msg_key = str(self._msg_count)
             self._messages[msg_key] = summary
+            if not self._matches_live_filter(summary):
+                continue
 
             # Format time
             ts = summary["gateway_ts"]
@@ -356,11 +371,14 @@ class EDDNTailApp(App):
                 key=msg_key,
             )
 
-            # Auto-scroll: move cursor to latest row
-            try:
-                table.move_cursor(row=len(table.rows) - 1)
-            except Exception:
-                pass
+            # Auto-scroll: only move to latest if cursor is already near the bottom
+            total_rows = len(table.rows)
+            if total_rows > 0:
+                try:
+                    if table.cursor_row >= total_rows - 2:
+                        table.move_cursor(row=total_rows - 1)
+                except Exception:
+                    pass
 
     def _refresh_table(self) -> None:
         """Rebuild the table from stored messages, applying current filters."""
@@ -421,7 +439,11 @@ class EDDNTailApp(App):
         filter_info = ""
         if any([self._event_filter, self._system_filter,
                 self._station_filter, self._schema_filter, self._live_filter]):
-            filter_info = f" | Filters: {self._filtered_count} dropped"
+            live_dropped = sum(
+                1 for s in self._messages.values()
+                if not self._matches_live_filter(s)
+            )
+            filter_info = f" | Filters: {self._filtered_count + live_dropped} dropped"
         endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
         endpoint_name = endpoint_name[0] if endpoint_name else self._endpoint
         stats.update(
