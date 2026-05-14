@@ -225,6 +225,7 @@ class EDDNTailApp(App):
         self._filtered_count = 0
         self._app_start_time = datetime.now(timezone.utc)
         self._live_filter = ""
+        self._live_filter_pattern: Optional[re.Pattern] = None
         self._messages: dict[str, dict] = {}  # keyed by row key for O(1) lookup
 
     def compose(self) -> ComposeResult:
@@ -268,6 +269,15 @@ class EDDNTailApp(App):
         if self._receiver:
             self._receiver.close()
 
+    def _compile_live_filter(self) -> Optional[re.Pattern]:
+        """Compile the live filter string into a regex pattern, or None if invalid."""
+        if not self._live_filter:
+            return None
+        try:
+            return re.compile(self._live_filter, re.IGNORECASE)
+        except re.error:
+            return None
+
     def _matches_filters(self, summary: dict) -> bool:
         """Check if a message matches all configured filters."""
         if self._event_filter and self._event_filter not in summary["event"].lower():
@@ -280,17 +290,13 @@ class EDDNTailApp(App):
             return False
         # Live filter (from input box) — match against multiple fields
         if self._live_filter:
-            try:
-                pattern = re.compile(self._live_filter, re.IGNORECASE)
-            except re.error:
-                pattern = None
             haystack = " ".join([
                 summary["event"], summary["system"], summary["station"],
                 summary["body"], summary["uploader_id"], summary["schema"],
                 summary["software"],
             ]).lower()
-            if pattern:
-                if not pattern.search(haystack):
+            if self._live_filter_pattern:
+                if not self._live_filter_pattern.search(haystack):
                     return False
             elif self._live_filter.lower() not in haystack:
                 return False
@@ -447,6 +453,7 @@ class EDDNTailApp(App):
     def on_filter_changed(self, event: Input.Changed) -> None:
         """Update live filter from input and re-apply to displayed messages."""
         self._live_filter = event.value.strip()
+        self._live_filter_pattern = self._compile_live_filter()
         self._refresh_table()
         self._update_pane_titles()
 
@@ -474,6 +481,7 @@ class EDDNTailApp(App):
 
     def action_clear_filter(self) -> None:
         self._live_filter = ""
+        self._live_filter_pattern = None
         self.query_one("#filter-input", Input).value = ""
         self.query_one("#filter-bar").display = False
         # Note: setting inp.value fires Input.Changed which calls _refresh_table

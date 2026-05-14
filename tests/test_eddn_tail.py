@@ -31,18 +31,20 @@ def _compress(data: dict) -> bytes:
     return zlib.compress(json.dumps(data).encode())
 
 
-def _bind_pub():
-    """Create a PUB socket bound to an ephemeral port, return (ctx, pub, url).
+def _bind_zmq_pub() -> tuple:
+    """Create a PUB socket bound to an ephemeral port.
 
-    EDDNReceiver creates its own zmq.Context internally, so inproc://
-    (which requires same-context) won't work. We use tcp://127.0.0.1
-    with a random port instead.
+    Returns (ctx, pub, url). EDDNReceiver creates its own zmq.Context
+    internally, so inproc:// (which requires same-context) won't work.
+    We use tcp://127.0.0.1 with a random port instead.
+
+    Callers must sleep after connecting a subscriber to allow the
+    ZMQ SUB handshake to complete (slow-joiner problem).
     """
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     port = pub.bind_to_random_port("tcp://127.0.0.1")
     url = f"tcp://127.0.0.1:{port}"
-    time.sleep(0.15)  # allow SUB connection to establish
     return ctx, pub, url
 
 
@@ -299,20 +301,14 @@ class TestEDDNReceiver:
     after creating the receiver before publishing.
     """
 
-    @staticmethod
-    def _setup_receiver():
-        """Bind a PUB socket, create an EDDNReceiver connected to it, and wait.
+    def _setup_receiver(self):
+        """Bind a PUB socket and create an EDDNReceiver connected to it.
 
         Returns (ctx, pub, receiver) ready for publishing.
         """
-        ctx = zmq.Context()
-        pub = ctx.socket(zmq.PUB)
-        port = pub.bind_to_random_port("tcp://127.0.0.1")
-        url = f"tcp://127.0.0.1:{port}"
-        # Create receiver after PUB is bound so connection can establish
+        ctx, pub, url = _bind_zmq_pub()
         receiver = EDDNReceiver(url, topic_filter="")
-        # Sleep to allow ZMQ SUB connection handshake to complete
-        time.sleep(0.3)
+        time.sleep(0.3)  # allow ZMQ SUB connection handshake
         return ctx, pub, receiver
 
     def test_receive_valid_message(self):
@@ -332,7 +328,8 @@ class TestEDDNReceiver:
 
     def test_timeout_returns_none(self):
         """Receiver with no publisher sending should time out and return None."""
-        ctx, pub, url = _bind_pub()
+        ctx, pub, url = _bind_zmq_pub()
+        time.sleep(0.15)  # allow SUB connection for timeout test
         receiver = EDDNReceiver(url)
         result = receiver.recv_message()
         receiver.close()
@@ -364,7 +361,8 @@ class TestEDDNReceiver:
 
     def test_close_no_error(self):
         """close() should not raise."""
-        ctx, pub, url = _bind_pub()
+        ctx, pub, url = _bind_zmq_pub()
+        time.sleep(0.15)  # allow SUB connection
         receiver = EDDNReceiver(url)
         receiver.close()
         pub.close(linger=0)
@@ -456,17 +454,20 @@ class TestMatchesFilters:
     def test_live_filter_valid_regex(self):
         app = self._make_app()
         app._live_filter = "sol|lave"
+        app._live_filter_pattern = app._compile_live_filter()
         assert app._matches_filters(self._scan_summary()) is True
         assert app._matches_filters(self._commodity_summary()) is True
 
     def test_live_filter_regex_case_insensitive(self):
         app = self._make_app()
         app._live_filter = "SOL"
+        app._live_filter_pattern = app._compile_live_filter()
         assert app._matches_filters(self._scan_summary()) is True
 
     def test_live_filter_invalid_regex_falls_back_to_substring(self):
         app = self._make_app()
         app._live_filter = "[invalid"
+        app._live_filter_pattern = app._compile_live_filter()
         # Should not crash; falls back to substring match
         s = self._scan_summary()
         # "[invalid" is not a substring anywhere in the haystack
@@ -475,12 +476,14 @@ class TestMatchesFilters:
     def test_live_filter_valid_regex_substring_match(self):
         app = self._make_app()
         app._live_filter = "Scan"
+        app._live_filter_pattern = app._compile_live_filter()
         # "Scan" is a valid regex AND a substring in the haystack
         assert app._matches_filters(self._scan_summary()) is True
 
     def test_live_filter_non_matching(self):
         app = self._make_app()
         app._live_filter = "zzz_nonexistent"
+        app._live_filter_pattern = app._compile_live_filter()
         assert app._matches_filters(self._scan_summary()) is False
 
     def test_empty_event_no_match(self):
