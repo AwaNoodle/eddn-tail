@@ -35,6 +35,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.widgets import Footer, Header, Input, Static, DataTable
+    from rich.markup import escape as rich_escape
 except ImportError:
     print("eddn_tail requires pyzmq, textual, and rich: pip install .", file=sys.stderr)
     sys.exit(1)
@@ -214,6 +215,9 @@ class EDDNTailApp(App):
     ):
         super().__init__()
         self._endpoint = endpoint
+        self._endpoint_name = next(
+            (k for k, v in EDDN_ENDPOINTS.items() if v == endpoint), endpoint
+        )
         self._event_filter = event_filter.lower()
         self._system_filter = system_filter.lower()
         self._station_filter = station_filter.lower()
@@ -226,7 +230,7 @@ class EDDNTailApp(App):
         self._app_start_time = datetime.now(timezone.utc)
         self._live_filter = ""
         self._live_filter_pattern: Optional[re.Pattern] = None
-        self._messages: dict[str, dict] = {}  # keyed by row key for O(1) lookup
+        self._messages: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -277,6 +281,33 @@ class EDDNTailApp(App):
             return re.compile(self._live_filter, re.IGNORECASE)
         except re.error:
             return None
+
+    @staticmethod
+    def _format_row(summary: dict) -> tuple:
+        """Format a message summary into a tuple of row values for DataTable."""
+        ts = summary["gateway_ts"]
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            time_str = dt.strftime("%H:%M:%S")
+        except (ValueError, AttributeError):
+            time_str = ts[:8] if ts else "??"
+
+        schema_label = summary["schema"]
+        color = SCHEMA_COLORS.get(schema_label, "white")
+
+        location = summary["station"] or summary["body"]
+        if summary["star_class"] and summary["event"] == "FSDJump":
+            location = f"[{summary['star_class']}]"
+
+        return (
+            time_str,
+            f"[{color}]{schema_label}[/{color}]",
+            summary["event"],
+            summary["system"],
+            location,
+            summary["uploader_id"][:12],
+            summary["software"][:20],
+        )
 
     def _matches_cli_filters(self, summary: dict) -> bool:
         """Check if a message matches the CLI filters (--event, --system, etc.).
@@ -343,33 +374,7 @@ class EDDNTailApp(App):
             if not self._matches_live_filter(summary):
                 continue
 
-            # Format time
-            ts = summary["gateway_ts"]
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                time_str = dt.strftime("%H:%M:%S")
-            except (ValueError, AttributeError):
-                time_str = ts[:8] if ts else "??"
-
-            # Schema with color label
-            schema_label = summary["schema"]
-            color = SCHEMA_COLORS.get(schema_label, "white")
-
-            # Station/body display
-            location = summary["station"] or summary["body"]
-            if summary["star_class"] and summary["event"] == "FSDJump":
-                location = f"[{summary['star_class']}]"
-
-            table.add_row(
-                time_str,
-                f"[{color}]{schema_label}[/{color}]",
-                summary["event"],
-                summary["system"],
-                location,
-                summary["uploader_id"][:12],
-                summary["software"][:20],
-                key=msg_key,
-            )
+            table.add_row(*self._format_row(summary), key=msg_key)
 
             # Auto-scroll: only move to latest if cursor is already near the bottom
             total_rows = len(table.rows)
@@ -391,40 +396,16 @@ class EDDNTailApp(App):
                 live_filtered += 1
                 continue
 
-            ts = summary["gateway_ts"]
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                time_str = dt.strftime("%H:%M:%S")
-            except (ValueError, AttributeError):
-                time_str = ts[:8] if ts else "??"
-
-            schema_label = summary["schema"]
-            color = SCHEMA_COLORS.get(schema_label, "white")
-            location = summary["station"] or summary["body"]
-            if summary["star_class"] and summary["event"] == "FSDJump":
-                location = f"[{summary['star_class']}]"
-
-            table.add_row(
-                time_str,
-                f"[{color}]{schema_label}[/{color}]",
-                summary["event"],
-                summary["system"],
-                location,
-                summary["uploader_id"][:12],
-                summary["software"][:20],
-                key=msg_key,
-            )
+            table.add_row(*self._format_row(summary), key=msg_key)
 
     def _update_pane_titles(self) -> None:
         """Update border titles on both panes to reflect state."""
         msg_pane = self.query_one("#message-pane", Vertical)
         status_icon = "⏸" if self._paused else "▶"
-        endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
-        endpoint_name = endpoint_name[0] if endpoint_name else self._endpoint
         has_filter = any([self._event_filter, self._system_filter,
                          self._station_filter, self._schema_filter, self._live_filter])
         filter_tag = " [dim]\\[filtered][/dim]" if has_filter else ""
-        msg_pane.border_title = f"{status_icon} Messages - {'Paused' if self._paused else endpoint_name.title()}{filter_tag}"
+        msg_pane.border_title = f"{status_icon} Messages - {'Paused' if self._paused else self._endpoint_name.title()}{filter_tag}"
 
         detail_pane = self.query_one("#detail-pane", VerticalScroll)
         detail_pane.border_title = "Message Detail"
@@ -444,10 +425,8 @@ class EDDNTailApp(App):
                 if not self._matches_live_filter(s)
             )
             filter_info = f" | Filters: {self._filtered_count + live_dropped} dropped"
-        endpoint_name = [k for k, v in EDDN_ENDPOINTS.items() if v == self._endpoint]
-        endpoint_name = endpoint_name[0] if endpoint_name else self._endpoint
         stats.update(
-            f"{status} │ {endpoint_name} │ "
+            f"{status} │ {self._endpoint_name} │ "
             f"Total: {self._msg_count} │ Shown: {shown} │ "
             f"Rate: {rate:.1f}/s{filter_info}"
         )
@@ -464,10 +443,9 @@ class EDDNTailApp(App):
             summary = self._messages[msg_key]
             detail = self.query_one("#detail-content", Static)
             # Escape Rich markup in JSON (brackets are interpreted as tags)
-            from rich.markup import escape  # noqa: E402 — avoid importing Rich at module load if only CLI is needed
             raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
             # Show only the raw JSON — no header, no truncation
-            detail.update(escape(raw_json))
+            detail.update(rich_escape(raw_json))
             # Scroll detail pane back to top for new selection
             self.query_one("#detail-pane", VerticalScroll).scroll_home(animate=False)
 
