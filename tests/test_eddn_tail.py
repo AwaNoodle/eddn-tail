@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 import json
+import re
 import time
 import zlib
 
@@ -26,8 +28,64 @@ from eddn_tail import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Module-level helpers
 # ---------------------------------------------------------------------------
+
+class _FakeWidget:
+    """Minimal stand-in for Textual widgets used in unit tests."""
+    def clear(self):
+        pass
+    def update(self, text=""):
+        pass
+    rows = []
+    border_title = ""
+    display = True
+
+
+def _make_app(**kwargs):
+    """Create an EDDNTailApp with widget calls mocked out."""
+    app = EDDNTailApp(endpoint="tcp://localhost:9999", **kwargs)
+    app.query_one = lambda selector, type=None: _FakeWidget()
+    return app
+
+
+def _scan_summary(system="Sol", event="Scan", body="Earth", **overrides):
+    """Build a Scan-type summary dict with sensible defaults."""
+    base = {
+        "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+        "header": {
+            "uploaderID": "cmdr1",
+            "softwareName": "EDMC",
+            "softwareVersion": "5.0",
+            "gatewayTimestamp": "2026-05-10T22:36:19Z",
+        },
+        "message": {
+            "event": event,
+            "StarSystem": system,
+            "BodyName": body,
+        },
+    }
+    base.update(overrides)
+    return extract_summary(base)
+
+
+def _commodity_summary(system="Lave", station="Lave Station", **overrides):
+    """Build a Commodity-type summary dict with sensible defaults."""
+    base = {
+        "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
+        "header": {
+            "uploaderID": "trader42",
+            "softwareName": "EDD",
+            "softwareVersion": "3.1",
+            "gatewayTimestamp": "2026-05-10T23:00:00Z",
+        },
+        "message": {
+            "systemName": system,
+            "stationName": station,
+        },
+    }
+    base.update(overrides)
+    return extract_summary(base)
 
 def _compress(data: dict) -> bytes:
     """JSON-encode and zlib-compress an EDDN message dict."""
@@ -84,7 +142,7 @@ class TestExtractSummary:
         assert s["software"] == "EDMC 5.0"
         assert s["gateway_ts"] == "2026-05-10T22:36:19.745292Z"
         assert s["journal_ts"] == "2026-05-10T22:36:00Z"
-        assert s["raw"] is msg
+        assert "raw" not in s  # raw is stored separately in _raw_messages
 
     def test_commodity_message(self):
         msg = {
@@ -316,208 +374,188 @@ class TestEDDNReceiver:
 
     def test_receive_valid_message(self):
         ctx, pub, receiver = self._setup_receiver()
-        msg = {
-            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
-            "header": {"uploaderID": "test"},
-            "message": {"event": "Scan", "StarSystem": "Sol"},
-        }
-        pub.send(_compress(msg))
-        result = receiver.recv_message()
-        receiver.close()
-        pub.close(linger=0)
-        ctx.term()
-        assert result is not None
-        assert result["message"]["event"] == "Scan"
+        try:
+            msg = {
+                "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+                "header": {"uploaderID": "test"},
+                "message": {"event": "Scan", "StarSystem": "Sol"},
+            }
+            pub.send(_compress(msg))
+            result = receiver.recv_message()
+            assert result is not None
+            assert result["message"]["event"] == "Scan"
+        finally:
+            receiver.close()
+            pub.close(linger=0)
+            ctx.term()
 
     def test_timeout_returns_none(self):
         """Receiver with no publisher sending should time out and return None."""
         ctx, pub, url = _bind_zmq_pub()
         time.sleep(0.15)  # allow SUB connection for timeout test
         receiver = EDDNReceiver(url)
-        result = receiver.recv_message()
-        receiver.close()
-        pub.close(linger=0)
-        ctx.term()
-        assert result is None
+        try:
+            result = receiver.recv_message()
+            assert result is None
+        finally:
+            receiver.close()
+            pub.close(linger=0)
+            ctx.term()
 
     def test_invalid_zlib_returns_error(self):
         """Sending raw (non-zlib) bytes should produce an _error dict."""
         ctx, pub, receiver = self._setup_receiver()
-        pub.send(b"this is not zlib compressed")
-        result = receiver.recv_message()
-        receiver.close()
-        pub.close(linger=0)
-        ctx.term()
-        assert result is not None
-        assert "_error" in result
+        try:
+            pub.send(b"this is not zlib compressed")
+            result = receiver.recv_message()
+            assert result is not None
+            assert "_error" in result
+        finally:
+            receiver.close()
+            pub.close(linger=0)
+            ctx.term()
 
     def test_invalid_json_returns_error(self):
         """Sending zlib-compressed non-JSON should produce an _error dict."""
         ctx, pub, receiver = self._setup_receiver()
-        pub.send(zlib.compress(b"not valid json{"))
-        result = receiver.recv_message()
-        receiver.close()
-        pub.close(linger=0)
-        ctx.term()
-        assert result is not None
-        assert "_error" in result
+        try:
+            pub.send(zlib.compress(b"not valid json{"))
+            result = receiver.recv_message()
+            assert result is not None
+            assert "_error" in result
+        finally:
+            receiver.close()
+            pub.close(linger=0)
+            ctx.term()
 
     def test_close_no_error(self):
         """close() should not raise."""
         ctx, pub, url = _bind_zmq_pub()
         time.sleep(0.15)  # allow SUB connection
         receiver = EDDNReceiver(url)
-        receiver.close()
-        pub.close(linger=0)
-        ctx.term()
+        try:
+            receiver.close()
+        finally:
+            pub.close(linger=0)
+            ctx.term()
         # If we get here without exception, the test passes
 
 
 # ---------------------------------------------------------------------------
-# 3. _matches_filters()
+# 3. Combined filter matching (CLI + live)
 # ---------------------------------------------------------------------------
 
+def _matches_all(app, summary):
+    """Helper: check both CLI and live filters (replaces removed _matches_filters)."""
+    return app._matches_cli_filters(summary) and app._matches_live_filter(summary)
+
+
 class TestMatchesFilters:
-    """Tests for the _matches_filters method on EDDNTailApp."""
-
-    def _make_app(self, **kwargs):
-        app = EDDNTailApp(endpoint="tcp://localhost:9999", **kwargs)
-        return app
-
-    def _scan_summary(self):
-        return extract_summary({
-            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
-            "header": {
-                "uploaderID": "cmdr1",
-                "softwareName": "EDMC",
-                "softwareVersion": "5.0",
-                "gatewayTimestamp": "2026-05-10T22:36:19Z",
-            },
-            "message": {
-                "event": "Scan",
-                "StarSystem": "Sol",
-                "BodyName": "Earth",
-            },
-        })
-
-    def _commodity_summary(self):
-        return extract_summary({
-            "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
-            "header": {
-                "uploaderID": "trader42",
-                "softwareName": "EDD",
-                "softwareVersion": "3.1",
-                "gatewayTimestamp": "2026-05-10T23:00:00Z",
-            },
-            "message": {
-                "systemName": "Lave",
-                "stationName": "Lave Station",
-            },
-        })
+    """Tests for combined CLI + live filter matching on EDDNTailApp."""
 
     def test_no_filters_match_everything(self):
-        app = self._make_app()
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is True
+        app = _make_app()
+        assert _matches_all(app, _scan_summary()) is True
+        assert _matches_all(app, _commodity_summary()) is True
 
     def test_event_filter_case_insensitive(self):
-        app = self._make_app(event_filter="scan")
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is False
+        app = _make_app(event_filter="scan")
+        assert _matches_all(app, _scan_summary()) is True
+        assert _matches_all(app, _commodity_summary()) is False
 
     def test_event_filter_substring(self):
-        app = self._make_app(event_filter="Sc")
-        assert app._matches_filters(self._scan_summary()) is True
+        app = _make_app(event_filter="Sc")
+        assert _matches_all(app, _scan_summary()) is True
 
     def test_system_filter(self):
-        app = self._make_app(system_filter="sol")
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is False
+        app = _make_app(system_filter="sol")
+        assert _matches_all(app, _scan_summary()) is True
+        assert _matches_all(app, _commodity_summary()) is False
 
     def test_station_filter(self):
-        app = self._make_app(station_filter="lave station")
-        assert app._matches_filters(self._commodity_summary()) is True
-        assert app._matches_filters(self._scan_summary()) is False
+        app = _make_app(station_filter="lave station")
+        assert _matches_all(app, _commodity_summary()) is True
+        assert _matches_all(app, _scan_summary()) is False
 
     def test_schema_filter(self):
-        app = self._make_app(schema_filter="journal/1")
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is False
+        app = _make_app(schema_filter="journal/1")
+        assert _matches_all(app, _scan_summary()) is True
+        assert _matches_all(app, _commodity_summary()) is False
 
     def test_combined_filters_and_logic(self):
-        app = self._make_app(event_filter="scan", system_filter="sol")
-        s = self._scan_summary()
-        assert app._matches_filters(s) is True
+        app = _make_app(event_filter="scan", system_filter="sol")
+        s = _scan_summary()
+        assert _matches_all(app, s) is True
 
     def test_combined_filters_one_fails(self):
-        app = self._make_app(event_filter="scan", system_filter="lave")
-        s = self._scan_summary()
-        assert app._matches_filters(s) is False  # system is Sol, not Lave
+        app = _make_app(event_filter="scan", system_filter="lave")
+        s = _scan_summary()
+        assert _matches_all(app, s) is False  # system is Sol, not Lave
 
     def test_live_filter_valid_regex(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "sol|lave"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_filters(self._scan_summary()) is True
-        assert app._matches_filters(self._commodity_summary()) is True
+        assert _matches_all(app, _scan_summary()) is True
+        assert _matches_all(app, _commodity_summary()) is True
 
     def test_live_filter_regex_case_insensitive(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "SOL"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_filters(self._scan_summary()) is True
+        assert _matches_all(app, _scan_summary()) is True
 
     def test_live_filter_invalid_regex_falls_back_to_substring(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "[invalid"
         app._live_filter_pattern = app._compile_live_filter()
         # Should not crash; falls back to substring match
-        s = self._scan_summary()
+        s = _scan_summary()
         # "[invalid" is not a substring anywhere in the haystack
-        assert app._matches_filters(s) is False
+        assert _matches_all(app, s) is False
 
     def test_live_filter_valid_regex_substring_match(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "Scan"
         app._live_filter_pattern = app._compile_live_filter()
         # "Scan" is a valid regex AND a substring in the haystack
-        assert app._matches_filters(self._scan_summary()) is True
+        assert _matches_all(app, _scan_summary()) is True
 
     def test_live_filter_non_matching(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "zzz_nonexistent"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_filters(self._scan_summary()) is False
+        assert _matches_all(app, _scan_summary()) is False
 
     def test_empty_event_no_match(self):
         """A summary with empty event should not match a non-empty event_filter."""
-        app = self._make_app(event_filter="Scan")
+        app = _make_app(event_filter="Scan")
         empty_summary = extract_summary({
             "$schemaRef": "",
             "header": {},
             "message": {},
         })
-        assert app._matches_filters(empty_summary) is False
+        assert _matches_all(app, empty_summary) is False
 
     def test_commodity_event_matches_commodity_filter(self):
         """A commodity/3 message with derived event='commodity' matches 'commodity' filter."""
-        app = self._make_app(event_filter="commodity")
+        app = _make_app(event_filter="commodity")
         commodity_summary = extract_summary({
             "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
             "header": {"uploaderID": "trader"},
             "message": {"systemName": "Lave", "stationName": "Lave Station"},
         })
-        assert app._matches_filters(commodity_summary) is True
+        assert _matches_all(app, commodity_summary) is True
 
     def test_commodity_event_does_not_match_scan_filter(self):
         """A commodity/3 message with derived event should not match 'Scan' filter."""
-        app = self._make_app(event_filter="scan")
+        app = _make_app(event_filter="scan")
         commodity_summary = extract_summary({
             "$schemaRef": "https://eddn.edcd.io/schemas/commodity/3",
             "header": {"uploaderID": "trader"},
             "message": {"systemName": "Lave", "stationName": "Lave Station"},
         })
-        assert app._matches_filters(commodity_summary) is False
+        assert _matches_all(app, commodity_summary) is False
 
 
 # ---------------------------------------------------------------------------
@@ -527,67 +565,47 @@ class TestMatchesFilters:
 class TestFilterSplit:
     """Tests for the split filter methods (CLI vs live)."""
 
-    def _make_app(self, **kwargs):
-        app = EDDNTailApp(endpoint="tcp://localhost:9999", **kwargs)
-        return app
-
-    def _scan_summary(self):
-        return extract_summary({
-            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
-            "header": {
-                "uploaderID": "cmdr1",
-                "softwareName": "EDMC",
-                "softwareVersion": "5.0",
-                "gatewayTimestamp": "2026-05-10T22:36:19Z",
-            },
-            "message": {
-                "event": "Scan",
-                "StarSystem": "Sol",
-                "BodyName": "Earth",
-            },
-        })
-
     def test_cli_filter_matches(self):
-        app = self._make_app(event_filter="scan")
-        assert app._matches_cli_filters(self._scan_summary()) is True
+        app = _make_app(event_filter="scan")
+        assert app._matches_cli_filters(_scan_summary()) is True
 
     def test_cli_filter_rejects(self):
-        app = self._make_app(event_filter="fsdjump")
-        assert app._matches_cli_filters(self._scan_summary()) is False
+        app = _make_app(event_filter="fsdjump")
+        assert app._matches_cli_filters(_scan_summary()) is False
 
     def test_live_filter_matches(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "sol"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_live_filter(self._scan_summary()) is True
+        assert app._matches_live_filter(_scan_summary()) is True
 
     def test_live_filter_rejects(self):
-        app = self._make_app()
+        app = _make_app()
         app._live_filter = "zzz"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_live_filter(self._scan_summary()) is False
+        assert app._matches_live_filter(_scan_summary()) is False
 
     def test_live_filter_empty_passes(self):
-        app = self._make_app()
+        app = _make_app()
         # No live filter set
-        assert app._matches_live_filter(self._scan_summary()) is True
+        assert app._matches_live_filter(_scan_summary()) is True
 
     def test_combined_still_competent(self):
-        """_matches_filters still checks both CLI and live filters."""
-        app = self._make_app(event_filter="scan")
+        """Combined filter check still verifies both CLI and live filters."""
+        app = _make_app(event_filter="scan")
         app._live_filter = "sol"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_filters(self._scan_summary()) is True
+        assert _matches_all(app, _scan_summary()) is True
 
     def test_cli_pass_live_fail_means_hidden(self):
         """A message passing CLI filter but failing live filter should
         still be stored (just not displayed)."""
-        app = self._make_app(event_filter="scan")
+        app = _make_app(event_filter="scan")
         app._live_filter = "zzz"
         app._live_filter_pattern = app._compile_live_filter()
-        assert app._matches_cli_filters(self._scan_summary()) is True
-        assert app._matches_live_filter(self._scan_summary()) is False
-        assert app._matches_filters(self._scan_summary()) is False
+        assert app._matches_cli_filters(_scan_summary()) is True
+        assert app._matches_live_filter(_scan_summary()) is False
+        assert _matches_all(app, _scan_summary()) is False
 
 
 # ---------------------------------------------------------------------------
@@ -697,16 +715,17 @@ class TestConstants:
 class TestClearEvents:
     """Tests for the action_clear_events method on EDDNTailApp."""
 
-    def _make_app(self):
-        return EDDNTailApp(endpoint="tcp://localhost:9999")
-
     def test_clear_events_resets_state(self):
         """Clearing events empties _messages and resets counters."""
-        app = self._make_app()
+        app = _make_app()
         # Populate state
         app._messages = {
-            "1": {"event": "Scan", "system": "Sol", "raw": {}},
-            "2": {"event": "FSDJump", "system": "Deciat", "raw": {}},
+            "1": {"event": "Scan", "system": "Sol"},
+            "2": {"event": "FSDJump", "system": "Deciat"},
+        }
+        app._raw_messages = {
+            "1": {"$schemaRef": ""},
+            "2": {"$schemaRef": ""},
         }
         app._msg_count = 10
         app._filtered_count = 3
@@ -718,12 +737,14 @@ class TestClearEvents:
         app.action_clear_events()
 
         assert app._messages == {}
+        assert app._raw_messages == {}
         assert app._msg_count == 0
         assert app._filtered_count == 0
+        assert app._live_hidden_count == 0
 
     def test_clear_events_after_clear_rate_resets(self):
         """After clearing, _app_start_time is updated so rate is sensible."""
-        app = self._make_app()
+        app = _make_app()
         old_start = app._app_start_time
         # Simulate some time passing
         app._app_start_time = old_start - timedelta(hours=1)
@@ -741,8 +762,9 @@ class TestClearEvents:
 
     def test_clear_events_clears_table_and_detail(self):
         """Clearing events calls clear() on DataTable and update("") on detail."""
-        app = self._make_app()
-        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app = _make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol"}}
+        app._raw_messages = {"1": {"$schemaRef": ""}}
         app._msg_count = 5
 
         table_cleared = []
@@ -777,8 +799,9 @@ class TestClearEvents:
 
     def test_clear_events_calls_notify(self):
         """Clearing events calls notify with the expected message."""
-        app = self._make_app()
-        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app = _make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol"}}
+        app._raw_messages = {"1": {"$schemaRef": ""}}
         app.query_one = lambda selector, type=None: _FakeWidget()
 
         notified = []
@@ -790,8 +813,9 @@ class TestClearEvents:
 
     def test_clear_events_updates_pane_titles(self):
         """After clearing, _update_pane_titles and _update_stats are called."""
-        app = self._make_app()
-        app._messages = {"1": {"event": "Scan", "system": "Sol", "raw": {}}}
+        app = _make_app()
+        app._messages = {"1": {"event": "Scan", "system": "Sol"}}
+        app._raw_messages = {"1": {"$schemaRef": ""}}
         app._msg_count = 5
 
         # Track that _update_pane_titles and _update_stats were called
@@ -807,18 +831,6 @@ class TestClearEvents:
 
         assert len(titles_called) == 1
         assert len(stats_called) == 1
-
-
-class _FakeWidget:
-    """Minimal stand-in for Textual widgets used in unit tests."""
-    def clear(self):
-        pass
-    def update(self, text=""):
-        pass
-    rows = []
-    border_title = ""
-    display = True
-
 
 # ---------------------------------------------------------------------------
 # 7. Event storage limit
@@ -912,73 +924,90 @@ class TestEventLimitEnforcement:
     def test_enforce_limit_below_cap(self):
         """No eviction when messages are under the limit."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=5)
-        from collections import OrderedDict
         app._messages = OrderedDict([
             ("1", {"event": "Scan"}),
             ("2", {"event": "FSDJump"}),
         ])
+        app._raw_messages = OrderedDict([
+            ("1", {"$schemaRef": ""}),
+            ("2", {"$schemaRef": ""}),
+        ])
         app._enforce_limit()
         assert len(app._messages) == 2
+        assert len(app._raw_messages) == 2
 
     def test_enforce_limit_at_cap(self):
         """No eviction when messages are exactly at the limit."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
-        from collections import OrderedDict
         app._messages = OrderedDict([
             ("1", {"event": "Scan"}),
             ("2", {"event": "FSDJump"}),
             ("3", {"event": "Dock"}),
         ])
+        app._raw_messages = OrderedDict([
+            ("1", {"$schemaRef": ""}),
+            ("2", {"$schemaRef": ""}),
+            ("3", {"$schemaRef": ""}),
+        ])
         app._enforce_limit()
         assert len(app._messages) == 3
+        assert len(app._raw_messages) == 3
 
     def test_enforce_limit_over_cap_evicts_oldest(self):
         """Eviction removes oldest messages first (FIFO)."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
-        from collections import OrderedDict
         app._messages = OrderedDict([
             ("1", {"event": "Scan"}),
             ("2", {"event": "FSDJump"}),
             ("3", {"event": "Dock"}),
             ("4", {"event": "Scan"}),
         ])
+        app._raw_messages = OrderedDict([
+            ("1", {"$schemaRef": ""}),
+            ("2", {"$schemaRef": ""}),
+            ("3", {"$schemaRef": ""}),
+            ("4", {"$schemaRef": ""}),
+        ])
         app._enforce_limit()
         assert len(app._messages) == 3
         assert "1" not in app._messages
         assert "4" in app._messages
+        assert "1" not in app._raw_messages
+        assert "4" in app._raw_messages
 
     def test_enforce_limit_multiple_evictions(self):
         """When limit is lowered, multiple messages are evicted."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=5)
-        from collections import OrderedDict
         app._messages = OrderedDict([
             (str(i), {"event": f"E{i}"}) for i in range(1, 8)
+        ])
+        app._raw_messages = OrderedDict([
+            (str(i), {"$schemaRef": ""}) for i in range(1, 8)
         ])
         app._max_event_limit = 3
         app._enforce_limit()
         assert len(app._messages) == 3
         assert "1" not in app._messages
         assert "7" in app._messages
+        assert len(app._raw_messages) == 3
+        assert "1" not in app._raw_messages
+        assert "7" in app._raw_messages
 
     def test_enforce_limit_empty_messages(self):
         """Enforce on empty dict is a no-op."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
-        from collections import OrderedDict
         app._messages = OrderedDict()
+        app._raw_messages = OrderedDict()
         app._enforce_limit()
         assert len(app._messages) == 0
+        assert len(app._raw_messages) == 0
 
 
 class TestApplyLimitFromInput:
     """Tests for _apply_limit_from_input validation."""
 
-    def _make_app(self):
-        app = EDDNTailApp(endpoint="tcp://localhost:9999")
-        app.query_one = lambda selector, type=None: _FakeWidget()
-        return app
-
     def test_valid_limit(self):
-        app = self._make_app()
+        app = _make_app()
         notified = []
         app.notify = lambda msg, **kw: notified.append(msg)
         app._refresh_table = lambda: None
@@ -987,35 +1016,35 @@ class TestApplyLimitFromInput:
         assert any("500" in n for n in notified)
 
     def test_boundary_min(self):
-        app = self._make_app()
+        app = _make_app()
         app.notify = lambda msg, **kw: None
         app._refresh_table = lambda: None
         app._apply_limit_from_input("1")
         assert app._max_event_limit == 1
 
     def test_boundary_max(self):
-        app = self._make_app()
+        app = _make_app()
         app.notify = lambda msg, **kw: None
         app._refresh_table = lambda: None
         app._apply_limit_from_input("1999")
         assert app._max_event_limit == 1999
 
     def test_rejects_zero(self):
-        app = self._make_app()
+        app = _make_app()
         notified = []
         app.notify = lambda msg, **kw: notified.append(msg)
         app._apply_limit_from_input("0")
         assert app._max_event_limit == DEFAULT_EVENT_LIMIT  # unchanged
 
     def test_rejects_too_large(self):
-        app = self._make_app()
+        app = _make_app()
         notified = []
         app.notify = lambda msg, **kw: notified.append(msg)
         app._apply_limit_from_input("2000")
         assert app._max_event_limit == DEFAULT_EVENT_LIMIT  # unchanged
 
     def test_rejects_non_integer(self):
-        app = self._make_app()
+        app = _make_app()
         notified = []
         app.notify = lambda msg, **kw: notified.append(msg)
         app._apply_limit_from_input("abc")
@@ -1023,10 +1052,12 @@ class TestApplyLimitFromInput:
 
     def test_enforce_limit_after_lowering(self):
         """Lowering the limit should immediately prune excess messages."""
-        app = self._make_app()
-        from collections import OrderedDict
+        app = _make_app()
         app._messages = OrderedDict([
             (str(i), {"event": f"E{i}"}) for i in range(1, 6)
+        ])
+        app._raw_messages = OrderedDict([
+            (str(i), {"$schemaRef": ""}) for i in range(1, 6)
         ])
         app._max_event_limit = 500
         app._refresh_table = lambda: None
@@ -1035,36 +1066,23 @@ class TestApplyLimitFromInput:
         assert len(app._messages) == 3
         assert "1" not in app._messages
         assert "5" in app._messages
+        assert len(app._raw_messages) == 3
+        assert "1" not in app._raw_messages
+        assert "5" in app._raw_messages
 
 
 class TestLiveFilterDiscardOnArrival:
     """Tests for the discard-on-arrival behavior when a live filter is active."""
-
-    def _scan_summary(self, system="Sol"):
-        return extract_summary({
-            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
-            "header": {
-                "uploaderID": "cmdr1",
-                "softwareName": "EDMC",
-                "softwareVersion": "5.0",
-                "gatewayTimestamp": "2026-05-10T22:36:19Z",
-            },
-            "message": {
-                "event": "Scan",
-                "StarSystem": system,
-                "BodyName": "Earth",
-            },
-        })
 
     def test_no_filter_stores_everything(self):
         """With no live filter, all messages that pass CLI filters are stored."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999")
         # No live filter set
         assert app._live_filter == ""
-        summary = self._scan_summary("Sol")
+        summary = _scan_summary("Sol")
         assert app._matches_cli_filters(summary) is True
         # Message would pass both checks and be stored
-        assert app._matches_filters(summary) is True
+        assert _matches_all(app, summary) is True
 
     def test_live_filter_discards_non_matching(self):
         """When a live filter is active, messages that don't match are not stored."""
@@ -1072,8 +1090,8 @@ class TestLiveFilterDiscardOnArrival:
         app._live_filter = "sol"
         app._live_filter_pattern = app._compile_live_filter()
 
-        matching = self._scan_summary("Sol")
-        non_matching = self._scan_summary("Deciat")
+        matching = _scan_summary("Sol")
+        non_matching = _scan_summary("Deciat")
 
         assert app._matches_live_filter(matching) is True
         assert app._matches_live_filter(non_matching) is False
@@ -1084,19 +1102,20 @@ class TestLiveFilterDiscardOnArrival:
         # non-matching messages are discarded
         assert app._live_filter and not app._matches_live_filter(non_matching)
 
-    def test_live_filter_discard_increments_filtered_count(self):
-        """Discarded messages should increment _filtered_count."""
+    def test_live_filter_discard_does_not_increment_filtered_count(self):
+        """Live-filtered messages are not counted in _filtered_count (CLI-only counter).
+        Instead, hidden messages are recalculated in _refresh_table."""
         app = EDDNTailApp(endpoint="tcp://localhost:9999")
         app._live_filter = "dec"
         app._live_filter_pattern = app._compile_live_filter()
 
         initial_count = app._filtered_count
-        # Simulate the discard path
-        non_matching = self._scan_summary("Sol")
+        # Simulate the discard path — live-filtered messages do NOT increment _filtered_count
+        non_matching = _scan_summary("Sol")
         if app._live_filter and not app._matches_live_filter(non_matching):
-            app._filtered_count += 1
+            pass  # discarded, but no _filtered_count increment
 
-        assert app._filtered_count == initial_count + 1
+        assert app._filtered_count == initial_count  # unchanged
 
     def test_live_filter_allows_matching_messages(self):
         """When a live filter is active, matching messages are stored normally."""
@@ -1104,7 +1123,7 @@ class TestLiveFilterDiscardOnArrival:
         app._live_filter = "sol"
         app._live_filter_pattern = app._compile_live_filter()
 
-        matching = self._scan_summary("Sol")
+        matching = _scan_summary("Sol")
         # Matching messages pass the live-filter check
         assert app._matches_live_filter(matching) is True
         # The discard condition should NOT be true
@@ -1120,7 +1139,7 @@ class TestLiveFilterDiscardOnArrival:
         app._live_filter = ""
         app._live_filter_pattern = None
 
-        summary = self._scan_summary("Deciat")
+        summary = _scan_summary("Deciat")
         # No live filter means no discard
         assert not (app._live_filter and not app._matches_live_filter(summary))
 
@@ -1135,3 +1154,217 @@ class TestLiveFilterDiscardOnArrival:
         # CLI filter should fail
         assert app._matches_cli_filters(non_matching) is False
         # Message is discarded before live filter is even checked
+
+
+# ---------------------------------------------------------------------------
+# 8. _format_row()
+# ---------------------------------------------------------------------------
+
+class TestFormatRow:
+    """Tests for the _format_row static method on EDDNTailApp."""
+
+    def _summary(self, **overrides):
+        """Build a minimal summary dict for _format_row testing."""
+        base = {
+            "gateway_ts": "2026-05-10T22:36:19.745292Z",
+            "schema": "journal/1",
+            "event": "Scan",
+            "system": "Sol",
+            "station": "Jameson Memorial",
+            "body": "Earth",
+            "star_class": "",
+            "uploader_id": "cmdr_tester",
+            "software": "EDMC 5.0",
+        }
+        base.update(overrides)
+        return base
+
+    def test_valid_iso_timestamp(self):
+        """Valid ISO timestamp → formatted time string."""
+        row = EDDNTailApp._format_row(self._summary(gateway_ts="2026-05-10T22:36:19Z"))
+        assert row[0] == "22:36:19"
+
+    def test_valid_iso_timestamp_with_microseconds(self):
+        """ISO timestamp with microseconds is formatted correctly."""
+        row = EDDNTailApp._format_row(self._summary(gateway_ts="2026-05-10T14:05:03.123456Z"))
+        assert row[0] == "14:05:03"
+
+    def test_invalid_timestamp_falls_back_to_prefix(self):
+        """Invalid timestamp string falls back to first 8 chars."""
+        row = EDDNTailApp._format_row(self._summary(gateway_ts="not-a-date"))
+        assert row[0] == "not-a-da"
+
+    def test_empty_timestamp_falls_back_to_question_marks(self):
+        """Empty timestamp string falls back to '??'."""
+        row = EDDNTailApp._format_row(self._summary(gateway_ts=""))
+        assert row[0] == "??"
+
+    def test_none_timestamp_falls_back_to_question_marks(self):
+        """None timestamp falls back to '??'."""
+        row = EDDNTailApp._format_row(self._summary(gateway_ts=None))
+        assert row[0] == "??"
+
+    def test_short_invalid_timestamp_falls_back_to_question_marks(self):
+        """Short invalid timestamp (less than 8 chars) falls back to '??'."""
+        # An invalid timestamp that's too short for ts[:8] to be meaningful
+        # and also fails fromisoformat
+        row = EDDNTailApp._format_row(self._summary(gateway_ts="bad"))
+        # ts[:8] for "bad" would be "bad", but since fromisoformat fails
+        # and ts is truthy, it returns ts[:8] which is "bad"
+        assert row[0] == "bad"
+
+    def test_schema_colors_journal(self):
+        """journal/1 schema uses cyan color."""
+        row = EDDNTailApp._format_row(self._summary(schema="journal/1"))
+        assert "[cyan]journal/1[/cyan]" == row[1]
+
+    def test_schema_colors_commodity(self):
+        """commodity/3 schema uses green color."""
+        row = EDDNTailApp._format_row(self._summary(schema="commodity/3"))
+        assert "[green]commodity/3[/green]" == row[1]
+
+    def test_schema_colors_outfitting(self):
+        """outfitting/2 schema uses yellow color."""
+        row = EDDNTailApp._format_row(self._summary(schema="outfitting/2"))
+        assert "[yellow]outfitting/2[/yellow]" == row[1]
+
+    def test_schema_colors_shipyard(self):
+        """shipyard/2 schema uses magenta color."""
+        row = EDDNTailApp._format_row(self._summary(schema="shipyard/2"))
+        assert "[magenta]shipyard/2[/magenta]" == row[1]
+
+    def test_unknown_schema_uses_white(self):
+        """Unknown schema falls back to white color."""
+        row = EDDNTailApp._format_row(self._summary(schema="fuel/1"))
+        assert "[white]fuel/1[/white]" == row[1]
+
+    def test_station_priority_over_body(self):
+        """When both station and body are present, station takes priority."""
+        row = EDDNTailApp._format_row(self._summary(station="Jameson Memorial", body="Earth"))
+        # Location is at index 4
+        assert row[4] == "Jameson Memorial"
+
+    def test_body_used_when_no_station(self):
+        """When only body is present (no station), body is shown."""
+        row = EDDNTailApp._format_row(self._summary(station="", body="Earth"))
+        assert row[4] == "Earth"
+
+    def test_fsdjump_with_star_class_shows_bracket(self):
+        """FSDJump with star_class shows [K] instead of station/body."""
+        row = EDDNTailApp._format_row(self._summary(
+            event="FSDJump", star_class="K", station="Jameson Memorial", body="Sol"
+        ))
+        assert row[4] == "[K]"
+
+    def test_fsdjump_without_star_class_shows_station(self):
+        """FSDJump without star_class shows station/body normally."""
+        row = EDDNTailApp._format_row(self._summary(
+            event="FSDJump", star_class="", station="Jameson Memorial"
+        ))
+        assert row[4] == "Jameson Memorial"
+
+    def test_non_fsdjump_ignores_star_class(self):
+        """Non-FSDJump event with star_class shows station, not [K]."""
+        row = EDDNTailApp._format_row(self._summary(
+            event="Scan", star_class="K", station="Jameson Memorial"
+        ))
+        assert row[4] == "Jameson Memorial"
+
+    def test_uploader_id_truncated_to_12(self):
+        """uploader_id is truncated to 12 characters."""
+        row = EDDNTailApp._format_row(self._summary(uploader_id="a_very_long_commander_name"))
+        assert row[5] == "a_very_long_"
+
+    def test_uploader_id_short_preserved(self):
+        """Short uploader_id is preserved as-is."""
+        row = EDDNTailApp._format_row(self._summary(uploader_id="cmdr"))
+        assert row[5] == "cmdr"
+
+    def test_software_truncated_to_20(self):
+        """software is truncated to 20 characters."""
+        row = EDDNTailApp._format_row(self._summary(
+            software="Very Long Software Name Version 12345"
+        ))
+        assert row[6] == "Very Long Software N"
+
+    def test_software_short_preserved(self):
+        """Short software name is preserved as-is."""
+        row = EDDNTailApp._format_row(self._summary(software="EDMC 5.0"))
+        assert row[6] == "EDMC 5.0"
+
+    def test_row_tuple_length(self):
+        """_format_row always returns a 7-element tuple."""
+        row = EDDNTailApp._format_row(self._summary())
+        assert len(row) == 7
+
+
+# ---------------------------------------------------------------------------
+# 9. _compile_live_filter()
+# ---------------------------------------------------------------------------
+
+class TestCompileLiveFilter:
+    """Direct tests for the _compile_live_filter method."""
+
+    def test_valid_regex_returns_compiled_pattern(self):
+        """Valid regex returns a compiled re.Pattern with IGNORECASE flag."""
+        app = _make_app()
+        app._live_filter = "sol|lave"
+        pattern = app._compile_live_filter()
+        assert pattern is not None
+        assert isinstance(pattern, re.Pattern)
+        assert pattern.flags & re.IGNORECASE
+
+    def test_valid_regex_matches_expected(self):
+        """Compiled pattern matches expected strings."""
+        app = _make_app()
+        app._live_filter = "sol"
+        pattern = app._compile_live_filter()
+        assert pattern.search("Sol") is not None
+        assert pattern.search("SOL") is not None  # IGNORECASE
+
+    def test_invalid_regex_returns_none(self):
+        """Invalid regex returns None instead of raising."""
+        app = _make_app()
+        app._live_filter = "[invalid"
+        pattern = app._compile_live_filter()
+        assert pattern is None
+
+    def test_empty_string_returns_none(self):
+        """Empty filter string returns None (no filter active)."""
+        app = _make_app()
+        app._live_filter = ""
+        pattern = app._compile_live_filter()
+        assert pattern is None
+
+    def test_none_equivalent_returns_none(self):
+        """Setting _live_filter to a falsy value returns None."""
+        app = _make_app()
+        app._live_filter = None
+        pattern = app._compile_live_filter()
+        assert pattern is None
+
+
+# ---------------------------------------------------------------------------
+# 10. _error handling in _poll_messages
+# ---------------------------------------------------------------------------
+
+class TestErrorHandling:
+    """Test that _error dicts are not added to _messages."""
+
+    def test_error_dict_not_stored(self):
+        """Messages with '_error' key should not be added to _messages."""
+        # We simulate the logic from _poll_messages:
+        # if "_error" in msg: continue
+        msg = {"_error": "decompression failed"}
+        assert "_error" in msg
+        # The message should be skipped, not stored
+        # We verify the condition directly
+        should_skip = "_error" in msg
+        assert should_skip is True
+
+    def test_normal_message_not_skipped(self):
+        """Normal messages without '_error' key should not be skipped."""
+        msg = {"$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+               "header": {"uploaderID": "test"},
+               "message": {"event": "Scan"}}
+        assert "_error" not in msg

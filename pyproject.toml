@@ -1,6 +1,6 @@
 [project]
 name = "eddn-tail"
-version = "0.2.0"
+version = "0.3.0"
 description = "A KinesisTail-like TUI for monitoring the EDDN live stream"
 readme = "README.md"
 license = "MIT"
@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "pyzmq>=25.0",
     "textual>=0.40",
-    "rich>=13.0",
+    "rich>=13.0",  # only used for rich.markup.escape; already a transitive dep of textual
 ]
 
 [project.urls]

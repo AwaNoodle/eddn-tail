@@ -145,7 +145,6 @@ def extract_summary(msg: dict) -> dict:
         "software": f"{software} {sw_version}".strip(),
         "gateway_ts": gateway_ts,
         "journal_ts": journal_ts,
-        "raw": msg,
     }
 
 
@@ -243,6 +242,8 @@ class EDDNTailApp(App):
         self._live_filter = ""
         self._live_filter_pattern: Optional[re.Pattern] = None
         self._messages: OrderedDict[str, dict] = OrderedDict()
+        self._raw_messages: OrderedDict[str, dict] = OrderedDict()
+        self._live_hidden_count = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -284,6 +285,7 @@ class EDDNTailApp(App):
     def on_unmount(self) -> None:
         if self._receiver:
             self._receiver.close()
+            self._receiver = None
 
     def _compile_live_filter(self) -> Optional[re.Pattern]:
         """Compile the live filter string into a regex pattern, or None if invalid."""
@@ -357,10 +359,6 @@ class EDDNTailApp(App):
             return self._live_filter_pattern.search(haystack) is not None
         return self._live_filter.lower() in haystack
 
-    def _matches_filters(self, summary: dict) -> bool:
-        """Check if a message matches all configured filters."""
-        return self._matches_cli_filters(summary) and self._matches_live_filter(summary)
-
     def _poll_messages(self) -> None:
         """Poll for new messages and add them to the table."""
         if self._paused or not self._receiver:
@@ -385,12 +383,12 @@ class EDDNTailApp(App):
 
             # --- Live filter: discard non-matching messages on arrival ---
             if self._live_filter and not self._matches_live_filter(summary):
-                self._filtered_count += 1
                 continue
 
             # --- Limit enforcement (FIFO): drop oldest if at capacity ---
             while len(self._messages) >= self._max_event_limit:
                 oldest_key, _ = self._messages.popitem(last=False)
+                self._raw_messages.pop(oldest_key, None)
                 try:
                     table.remove_row(oldest_key)
                 except Exception:
@@ -399,30 +397,32 @@ class EDDNTailApp(App):
             # Store for detail view (keyed by string for DataTable lookup)
             msg_key = str(self._msg_count)
             self._messages[msg_key] = summary
+            self._raw_messages[msg_key] = msg
 
             table.add_row(*self._format_row(summary), key=msg_key)
 
-            # Auto-scroll: only move to latest if cursor is already near the bottom
-            total_rows = len(table.rows)
-            if total_rows > 0:
-                try:
-                    if table.cursor_row >= total_rows - 2:
-                        table.move_cursor(row=total_rows - 1)
-                except Exception:
-                    pass
+        # Auto-scroll: move cursor once after the batch if near the bottom
+        total_rows = len(table.rows)
+        if total_rows > 0:
+            try:
+                if table.cursor_row >= total_rows - 2:
+                    table.move_cursor(row=total_rows - 1)
+            except Exception:
+                pass
 
     def _refresh_table(self) -> None:
         """Rebuild the table from stored messages, applying current filters."""
         table = self.query_one("#message-table", DataTable)
         table.clear()
 
-        live_filtered = 0
+        live_hidden = 0
         for msg_key, summary in self._messages.items():
-            if not self._matches_filters(summary):
-                live_filtered += 1
+            if not self._matches_cli_filters(summary) or not self._matches_live_filter(summary):
+                live_hidden += 1
                 continue
 
             table.add_row(*self._format_row(summary), key=msg_key)
+        self._live_hidden_count = live_hidden
 
     def _update_pane_titles(self) -> None:
         """Update border titles on both panes to reflect state."""
@@ -443,10 +443,11 @@ class EDDNTailApp(App):
         stats = self.query_one("#stats-bar", Static)
         shown = len(table.rows) if (table := self.query_one("#message-table", DataTable)) else 0
         status = "⏸ PAUSED" if self._paused else "▶ LIVE"
+        total_dropped = self._filtered_count + self._live_hidden_count
         filter_info = ""
         if any([self._event_filter, self._system_filter,
-                self._station_filter, self._schema_filter, self._live_filter]):
-            filter_info = f" | Dropped: {self._filtered_count}"
+                self._station_filter, self._schema_filter, self._live_filter]) or total_dropped > 0:
+            filter_info = f" | Dropped: {total_dropped}"
         stats.update(
             f"{status} │ {self._endpoint_name} │ "
             f"Total: {self._msg_count} │ Shown: {shown} │ "
@@ -462,11 +463,11 @@ class EDDNTailApp(App):
             return
         # Look up the message by its row key string
         msg_key = event.row_key.value
-        if msg_key is not None and msg_key in self._messages:
-            summary = self._messages[msg_key]
+        if msg_key is not None and msg_key in self._raw_messages:
+            raw = self._raw_messages[msg_key]
             detail = self.query_one("#detail-content", Static)
             # Escape Rich markup in JSON (brackets are interpreted as tags)
-            raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
+            raw_json = self._format_raw_json(raw)
             # Show only the raw JSON — no header, no truncation
             detail.update(rich_escape(raw_json))
             # Scroll detail pane back to top for new selection
@@ -542,8 +543,10 @@ class EDDNTailApp(App):
     def action_clear_events(self) -> None:
         """Clear all received events and reset the app to a clean state."""
         self._messages.clear()
+        self._raw_messages.clear()
         self._msg_count = 0
         self._filtered_count = 0
+        self._live_hidden_count = 0
         self._app_start_time = datetime.now(timezone.utc)
         self.query_one("#message-table", DataTable).clear()
         self.query_one("#detail-content", Static).update("")
@@ -555,6 +558,7 @@ class EDDNTailApp(App):
         """Evict oldest messages if storage exceeds the configured limit."""
         while len(self._messages) > self._max_event_limit:
             self._messages.popitem(last=False)
+            self._raw_messages.popitem(last=False)
 
     def action_set_limit(self) -> None:
         """Prompt the user to set a new event storage limit via the filter bar."""
@@ -581,6 +585,11 @@ class EDDNTailApp(App):
         except ValueError:
             self.notify("Invalid limit: must be an integer", severity="error")
 
+    @staticmethod
+    def _format_raw_json(raw: dict) -> str:
+        """Format raw message dict as pretty-printed JSON."""
+        return json.dumps(raw, indent=2, ensure_ascii=False)
+
     def action_export_json(self) -> None:
         """Export the currently selected message's JSON to a file."""
         table = self.query_one("#message-table", DataTable)
@@ -590,9 +599,9 @@ class EDDNTailApp(App):
         except Exception:
             self.notify("No row selected", severity="warning")
             return
-        if msg_key is not None and msg_key in self._messages:
-            summary = self._messages[msg_key]
-            raw_json = json.dumps(summary["raw"], indent=2, ensure_ascii=False)
+        if msg_key is not None and msg_key in self._raw_messages:
+            raw = self._raw_messages[msg_key]
+            raw_json = self._format_raw_json(raw)
             # Write to eddn_export_<timestamp>.json in current directory
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"eddn_export_{ts}.json"
@@ -615,6 +624,8 @@ class EDDNTailApp(App):
 
     def action_cursor_down(self) -> None:
         table = self.query_one("#message-table", DataTable)
+        if len(table.rows) == 0:
+            return
         try:
             table.move_cursor(row=min(len(table.rows) - 1, table.cursor_row + 1))
         except Exception:
@@ -654,7 +665,7 @@ In-app keybindings:
   q       Quit
 """,
     )
-    parser.add_argument("-f", "--event", default="", help="Filter by journal event name (e.g. Scan, FSDJump)")
+    parser.add_argument("-f", "--event", default="", help="Filter by journal event name using substring matching (e.g. Scan matches Scan and ScanBaryCentre)")
     parser.add_argument("-s", "--system", default="", help="Filter by system name")
     parser.add_argument("-t", "--station", default="", help="Filter by station name")
     parser.add_argument("-S", "--schema", default="", help="Filter by schema (e.g. journal/1, commodity/3)")
