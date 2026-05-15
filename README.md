@@ -45,6 +45,9 @@ eddn-tail -S commodity/3
 # Combine filters (AND logic)
 eddn-tail -f FSDJump -s Sol
 
+# Limit stored events (default: 500, max: 1999)
+eddn-tail -l 1000
+
 # Connect to beta EDDN
 eddn-tail --beta
 
@@ -61,6 +64,7 @@ eddn-tail --dev
 | `p` | Pause/resume stream |
 | `d` | Toggle detail pane |
 | `e` | Export selected message JSON to file |
+| `Alt+L` | Set event storage limit (1–1999) |
 | `Ctrl+L` | Clear all received events |
 | `↑/↓` | Navigate rows |
 | `Enter` | Show full message detail |
@@ -79,6 +83,12 @@ EDDN is a publish/subscribe message relay. When tools (like EDMC, EDDI, or Decky
 ### About the uploaderID column
 
 EDDN relays do not broadcast the original uploaderID. The relay hashes it with a rotating nonce every 3 minutes (`SHA-1(nonce + "-" + uploaderID)`) before broadcasting, so the values shown in the Uploader column are 40-character hex strings — not commander names. Because the hash changes every 3 minutes, there is no reliable way to filter by uploader from the CLI. Use the in-app live filter (`/`) for short-term substring matching on any visible column value.
+
+### Event storage limit
+
+By default, `eddn-tail` retains up to **500 events** in memory. When the limit is reached, the oldest events are dropped (FIFO). You can change this at startup with `-l`/`--limit` (range: 1–1999) or at runtime with `Alt+L`. Lowering the limit at runtime immediately prunes excess events to the new cap.
+
+When a **live filter** (`/`) is active, messages that don't match the filter are **discarded on arrival** — they are never stored. This means the storage limit applies only to messages you're actually interested in. Messages already in memory before the filter was activated remain until they age out via FIFO.
 
 To inspect a message's full JSON payload, select a row and press Enter, or press `e` to export it to a file.
 

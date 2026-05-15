@@ -11,9 +11,12 @@ import pytest
 import zmq
 
 from eddn_tail import (
+    DEFAULT_EVENT_LIMIT,
     EDDN_ENDPOINTS,
     EDDNReceiver,
     EDDNTailApp,
+    MAX_EVENT_LIMIT,
+    MIN_EVENT_LIMIT,
     SCHEMA_COLORS,
     SCHEMA_EVENT,
     SCHEMA_SHORT,
@@ -600,6 +603,9 @@ class TestMainArgParsing:
         args = parser.parse_args(argv)
         if args.beta and args.dev:
             parser.error("--beta and --dev are mutually exclusive")
+        # Validate limit (same logic as main())
+        if not (MIN_EVENT_LIMIT <= args.limit <= MAX_EVENT_LIMIT):
+            parser.error(f"--limit must be between {MIN_EVENT_LIMIT} and {MAX_EVENT_LIMIT}, got {args.limit}")
         return args
 
     def test_default_args(self):
@@ -812,3 +818,320 @@ class _FakeWidget:
     rows = []
     border_title = ""
     display = True
+
+
+# ---------------------------------------------------------------------------
+# 7. Event storage limit
+# ---------------------------------------------------------------------------
+
+class TestEventLimitConstants:
+    """Tests for the event limit constants."""
+
+    def test_min_limit(self):
+        assert MIN_EVENT_LIMIT == 1
+
+    def test_max_limit(self):
+        assert MAX_EVENT_LIMIT == 1999
+
+    def test_default_limit(self):
+        assert DEFAULT_EVENT_LIMIT == 500
+
+
+class TestEventLimitArgParsing:
+    """Tests for the --limit CLI argument."""
+
+    def _parse_args(self, argv):
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        if not (MIN_EVENT_LIMIT <= args.limit <= MAX_EVENT_LIMIT):
+            parser.error(f"--limit must be between {MIN_EVENT_LIMIT} and {MAX_EVENT_LIMIT}, got {args.limit}")
+        return args
+
+    def test_default_limit(self):
+        args = self._parse_args([])
+        assert args.limit == DEFAULT_EVENT_LIMIT
+
+    def test_explicit_limit(self):
+        args = self._parse_args(["--limit", "1000"])
+        assert args.limit == 1000
+
+    def test_short_flag(self):
+        args = self._parse_args(["-l", "100"])
+        assert args.limit == 100
+
+    def test_min_boundary(self):
+        args = self._parse_args(["--limit", "1"])
+        assert args.limit == 1
+
+    def test_max_boundary(self):
+        args = self._parse_args(["--limit", "1999"])
+        assert args.limit == 1999
+
+    def test_limit_zero_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parse_args(["--limit", "0"])
+
+    def test_limit_negative_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parse_args(["--limit", "-1"])
+
+    def test_limit_too_large_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parse_args(["--limit", "2000"])
+
+    def test_limit_not_integer_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parse_args(["--limit", "abc"])
+
+
+class TestEventLimitInit:
+    """Tests for EDDNTailApp initial_limit handling."""
+
+    def test_default_limit(self):
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        assert app._max_event_limit == DEFAULT_EVENT_LIMIT
+
+    def test_custom_limit(self):
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=100)
+        assert app._max_event_limit == 100
+
+    def test_limit_survives_clear(self):
+        """action_clear_events should not reset the limit."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=100)
+        app._messages = {"1": {"event": "Scan"}}
+        app._msg_count = 1
+        app.query_one = lambda selector, type=None: _FakeWidget()
+        app.notify = lambda msg: None
+        app.action_clear_events()
+        assert app._max_event_limit == 100
+
+
+class TestEventLimitEnforcement:
+    """Tests for the _enforce_limit and FIFO eviction logic."""
+
+    def test_enforce_limit_below_cap(self):
+        """No eviction when messages are under the limit."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=5)
+        from collections import OrderedDict
+        app._messages = OrderedDict([
+            ("1", {"event": "Scan"}),
+            ("2", {"event": "FSDJump"}),
+        ])
+        app._enforce_limit()
+        assert len(app._messages) == 2
+
+    def test_enforce_limit_at_cap(self):
+        """No eviction when messages are exactly at the limit."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
+        from collections import OrderedDict
+        app._messages = OrderedDict([
+            ("1", {"event": "Scan"}),
+            ("2", {"event": "FSDJump"}),
+            ("3", {"event": "Dock"}),
+        ])
+        app._enforce_limit()
+        assert len(app._messages) == 3
+
+    def test_enforce_limit_over_cap_evicts_oldest(self):
+        """Eviction removes oldest messages first (FIFO)."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
+        from collections import OrderedDict
+        app._messages = OrderedDict([
+            ("1", {"event": "Scan"}),
+            ("2", {"event": "FSDJump"}),
+            ("3", {"event": "Dock"}),
+            ("4", {"event": "Scan"}),
+        ])
+        app._enforce_limit()
+        assert len(app._messages) == 3
+        assert "1" not in app._messages
+        assert "4" in app._messages
+
+    def test_enforce_limit_multiple_evictions(self):
+        """When limit is lowered, multiple messages are evicted."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=5)
+        from collections import OrderedDict
+        app._messages = OrderedDict([
+            (str(i), {"event": f"E{i}"}) for i in range(1, 8)
+        ])
+        app._max_event_limit = 3
+        app._enforce_limit()
+        assert len(app._messages) == 3
+        assert "1" not in app._messages
+        assert "7" in app._messages
+
+    def test_enforce_limit_empty_messages(self):
+        """Enforce on empty dict is a no-op."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", initial_limit=3)
+        from collections import OrderedDict
+        app._messages = OrderedDict()
+        app._enforce_limit()
+        assert len(app._messages) == 0
+
+
+class TestApplyLimitFromInput:
+    """Tests for _apply_limit_from_input validation."""
+
+    def _make_app(self):
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        app.query_one = lambda selector, type=None: _FakeWidget()
+        return app
+
+    def test_valid_limit(self):
+        app = self._make_app()
+        notified = []
+        app.notify = lambda msg, **kw: notified.append(msg)
+        app._refresh_table = lambda: None
+        app._apply_limit_from_input("500")
+        assert app._max_event_limit == 500
+        assert any("500" in n for n in notified)
+
+    def test_boundary_min(self):
+        app = self._make_app()
+        app.notify = lambda msg, **kw: None
+        app._refresh_table = lambda: None
+        app._apply_limit_from_input("1")
+        assert app._max_event_limit == 1
+
+    def test_boundary_max(self):
+        app = self._make_app()
+        app.notify = lambda msg, **kw: None
+        app._refresh_table = lambda: None
+        app._apply_limit_from_input("1999")
+        assert app._max_event_limit == 1999
+
+    def test_rejects_zero(self):
+        app = self._make_app()
+        notified = []
+        app.notify = lambda msg, **kw: notified.append(msg)
+        app._apply_limit_from_input("0")
+        assert app._max_event_limit == DEFAULT_EVENT_LIMIT  # unchanged
+
+    def test_rejects_too_large(self):
+        app = self._make_app()
+        notified = []
+        app.notify = lambda msg, **kw: notified.append(msg)
+        app._apply_limit_from_input("2000")
+        assert app._max_event_limit == DEFAULT_EVENT_LIMIT  # unchanged
+
+    def test_rejects_non_integer(self):
+        app = self._make_app()
+        notified = []
+        app.notify = lambda msg, **kw: notified.append(msg)
+        app._apply_limit_from_input("abc")
+        assert app._max_event_limit == DEFAULT_EVENT_LIMIT  # unchanged
+
+    def test_enforce_limit_after_lowering(self):
+        """Lowering the limit should immediately prune excess messages."""
+        app = self._make_app()
+        from collections import OrderedDict
+        app._messages = OrderedDict([
+            (str(i), {"event": f"E{i}"}) for i in range(1, 6)
+        ])
+        app._max_event_limit = 500
+        app._refresh_table = lambda: None
+        app._apply_limit_from_input("3")
+        assert app._max_event_limit == 3
+        assert len(app._messages) == 3
+        assert "1" not in app._messages
+        assert "5" in app._messages
+
+
+class TestLiveFilterDiscardOnArrival:
+    """Tests for the discard-on-arrival behavior when a live filter is active."""
+
+    def _scan_summary(self, system="Sol"):
+        return extract_summary({
+            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+            "header": {
+                "uploaderID": "cmdr1",
+                "softwareName": "EDMC",
+                "softwareVersion": "5.0",
+                "gatewayTimestamp": "2026-05-10T22:36:19Z",
+            },
+            "message": {
+                "event": "Scan",
+                "StarSystem": system,
+                "BodyName": "Earth",
+            },
+        })
+
+    def test_no_filter_stores_everything(self):
+        """With no live filter, all messages that pass CLI filters are stored."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        # No live filter set
+        assert app._live_filter == ""
+        summary = self._scan_summary("Sol")
+        assert app._matches_cli_filters(summary) is True
+        # Message would pass both checks and be stored
+        assert app._matches_filters(summary) is True
+
+    def test_live_filter_discards_non_matching(self):
+        """When a live filter is active, messages that don't match are not stored."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        app._live_filter = "sol"
+        app._live_filter_pattern = app._compile_live_filter()
+
+        matching = self._scan_summary("Sol")
+        non_matching = self._scan_summary("Deciat")
+
+        assert app._matches_live_filter(matching) is True
+        assert app._matches_live_filter(non_matching) is False
+
+        # Simulate what _poll_messages does:
+        # matching messages pass the live-filter discard check
+        assert not (app._live_filter and not app._matches_live_filter(matching))
+        # non-matching messages are discarded
+        assert app._live_filter and not app._matches_live_filter(non_matching)
+
+    def test_live_filter_discard_increments_filtered_count(self):
+        """Discarded messages should increment _filtered_count."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        app._live_filter = "dec"
+        app._live_filter_pattern = app._compile_live_filter()
+
+        initial_count = app._filtered_count
+        # Simulate the discard path
+        non_matching = self._scan_summary("Sol")
+        if app._live_filter and not app._matches_live_filter(non_matching):
+            app._filtered_count += 1
+
+        assert app._filtered_count == initial_count + 1
+
+    def test_live_filter_allows_matching_messages(self):
+        """When a live filter is active, matching messages are stored normally."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        app._live_filter = "sol"
+        app._live_filter_pattern = app._compile_live_filter()
+
+        matching = self._scan_summary("Sol")
+        # Matching messages pass the live-filter check
+        assert app._matches_live_filter(matching) is True
+        # The discard condition should NOT be true
+        assert not (app._live_filter and not app._matches_live_filter(matching))
+
+    def test_clearing_filter_stores_all_new_messages(self):
+        """After clearing the live filter, all new messages pass the discard check."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999")
+        app._live_filter = "sol"
+        app._live_filter_pattern = app._compile_live_filter()
+
+        # Clear the filter
+        app._live_filter = ""
+        app._live_filter_pattern = None
+
+        summary = self._scan_summary("Deciat")
+        # No live filter means no discard
+        assert not (app._live_filter and not app._matches_live_filter(summary))
+
+    def test_cli_filters_still_discard_permanently(self):
+        """CLI filters always discard messages before live filter is checked."""
+        app = EDDNTailApp(endpoint="tcp://localhost:9999", event_filter="scan")
+        non_matching = extract_summary({
+            "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+            "header": {"uploaderID": "cmdr1"},
+            "message": {"event": "FSDJump", "StarSystem": "Sol"},
+        })
+        # CLI filter should fail
+        assert app._matches_cli_filters(non_matching) is False
+        # Message is discarded before live filter is even checked

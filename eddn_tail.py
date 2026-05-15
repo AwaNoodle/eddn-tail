@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import re
+from collections import OrderedDict
+
 import zmq
 
 try:
@@ -147,6 +149,12 @@ def extract_summary(msg: dict) -> dict:
     }
 
 
+# Event storage limit constants
+MIN_EVENT_LIMIT = 1
+MAX_EVENT_LIMIT = 1999
+DEFAULT_EVENT_LIMIT = 500
+
+
 class EDDNTailApp(App):
     """A KinesisTail-like TUI for the EDDN stream."""
 
@@ -201,6 +209,7 @@ class EDDNTailApp(App):
         Binding("d", "toggle_detail", "Toggle Detail", show=True),
         Binding("e", "export_json", "Export JSON", show=True),
         Binding("ctrl+l", "clear_events", "Clear Events", show=True),
+        Binding("alt+l", "set_limit", "Set Limit", show=False),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
     ]
@@ -212,6 +221,7 @@ class EDDNTailApp(App):
         system_filter: str = "",
         station_filter: str = "",
         schema_filter: str = "",
+        initial_limit: int = 500,
     ):
         super().__init__()
         self._endpoint = endpoint
@@ -222,6 +232,8 @@ class EDDNTailApp(App):
         self._system_filter = system_filter.lower()
         self._station_filter = station_filter.lower()
         self._schema_filter = schema_filter.lower()
+        self._max_event_limit = initial_limit
+        self._limit_input_mode = False
         self._receiver: Optional[EDDNReceiver] = None
         self._paused = False
         self._show_detail = True
@@ -230,7 +242,7 @@ class EDDNTailApp(App):
         self._app_start_time = datetime.now(timezone.utc)
         self._live_filter = ""
         self._live_filter_pattern: Optional[re.Pattern] = None
-        self._messages: dict[str, dict] = {}
+        self._messages: OrderedDict[str, dict] = OrderedDict()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -328,8 +340,11 @@ class EDDNTailApp(App):
     def _matches_live_filter(self, summary: dict) -> bool:
         """Check if a message matches the live (interactive) filter.
 
-        The live filter changes at runtime, so messages that don't match
-        are still stored for later retrieval when the filter changes.
+        The live filter changes at runtime. When a live filter is active,
+        non-matching messages are discarded on arrival (never stored),
+        so the storage pool only contains messages that matched the filter
+        at the time they arrived. Existing messages from before a filter
+        change remain in storage until evicted by FIFO or a filter change.
         """
         if not self._live_filter:
             return True
@@ -368,11 +383,22 @@ class EDDNTailApp(App):
                 self._filtered_count += 1
                 continue
 
+            # --- Live filter: discard non-matching messages on arrival ---
+            if self._live_filter and not self._matches_live_filter(summary):
+                self._filtered_count += 1
+                continue
+
+            # --- Limit enforcement (FIFO): drop oldest if at capacity ---
+            while len(self._messages) >= self._max_event_limit:
+                oldest_key, _ = self._messages.popitem(last=False)
+                try:
+                    table.remove_row(oldest_key)
+                except Exception:
+                    pass  # row may have been live-filtered out of the table
+
             # Store for detail view (keyed by string for DataTable lookup)
             msg_key = str(self._msg_count)
             self._messages[msg_key] = summary
-            if not self._matches_live_filter(summary):
-                continue
 
             table.add_row(*self._format_row(summary), key=msg_key)
 
@@ -420,14 +446,11 @@ class EDDNTailApp(App):
         filter_info = ""
         if any([self._event_filter, self._system_filter,
                 self._station_filter, self._schema_filter, self._live_filter]):
-            live_dropped = sum(
-                1 for s in self._messages.values()
-                if not self._matches_live_filter(s)
-            )
-            filter_info = f" | Filters: {self._filtered_count + live_dropped} dropped"
+            filter_info = f" | Dropped: {self._filtered_count}"
         stats.update(
             f"{status} │ {self._endpoint_name} │ "
             f"Total: {self._msg_count} │ Shown: {shown} │ "
+            f"Limit: {len(self._messages)}/{self._max_event_limit} │ "
             f"Rate: {rate:.1f}/s{filter_info}"
         )
         self._update_pane_titles()
@@ -452,6 +475,8 @@ class EDDNTailApp(App):
     @on(Input.Changed)
     def on_filter_changed(self, event: Input.Changed) -> None:
         """Update live filter from input and re-apply to displayed messages."""
+        if self._limit_input_mode:
+            return  # Don't filter while user is typing a limit value
         self._live_filter = event.value.strip()
         self._live_filter_pattern = self._compile_live_filter()
         self._refresh_table()
@@ -461,6 +486,8 @@ class EDDNTailApp(App):
     def on_filter_blur(self, event: Input.Blurred) -> None:
         """When filter input loses focus, hide the filter bar and remove from Tab cycle."""
         if event.input.id == "filter-input":
+            self._limit_input_mode = False
+            event.input.placeholder = "Filter: event, system, station, uploader, schema (regex supported)..."
             event.input.can_focus = False
             self.query_one("#filter-bar").display = False
 
@@ -468,6 +495,13 @@ class EDDNTailApp(App):
     def on_filter_submitted(self, event: Input.Submitted) -> None:
         """When Enter is pressed in the filter input, apply and close the popup."""
         if event.input.id == "filter-input":
+            if self._limit_input_mode:
+                value = event.input.value.strip()
+                self._apply_limit_from_input(value)
+                event.input.value = ""
+                event.input.placeholder = "Filter: event, system, station, uploader, schema (regex supported)..."
+                self._limit_input_mode = False
+            # else: normal filter — value already applied via Input.Changed
             event.input.can_focus = False
             self.query_one("#filter-bar").display = False
             self.query_one("#message-table", DataTable).focus()
@@ -516,6 +550,36 @@ class EDDNTailApp(App):
         self._update_pane_titles()
         self._update_stats()
         self.notify("Events cleared")
+
+    def _enforce_limit(self) -> None:
+        """Evict oldest messages if storage exceeds the configured limit."""
+        while len(self._messages) > self._max_event_limit:
+            self._messages.popitem(last=False)
+
+    def action_set_limit(self) -> None:
+        """Prompt the user to set a new event storage limit via the filter bar."""
+        self._limit_input_mode = True
+        filter_bar = self.query_one("#filter-bar")
+        filter_bar.display = True
+        inp = self.query_one("#filter-input", Input)
+        inp.can_focus = True
+        inp.placeholder = f"Enter new limit ({MIN_EVENT_LIMIT}-{MAX_EVENT_LIMIT}), then press Enter..."
+        inp.value = str(self._max_event_limit)
+        inp.focus()
+
+    def _apply_limit_from_input(self, value: str) -> None:
+        """Validate and apply a new limit from the input bar."""
+        try:
+            new_limit = int(value)
+            if MIN_EVENT_LIMIT <= new_limit <= MAX_EVENT_LIMIT:
+                self._max_event_limit = new_limit
+                self._enforce_limit()
+                self._refresh_table()
+                self.notify(f"Limit updated to {new_limit}")
+            else:
+                self.notify(f"Limit must be {MIN_EVENT_LIMIT}-{MAX_EVENT_LIMIT}", severity="error")
+        except ValueError:
+            self.notify("Invalid limit: must be an integer", severity="error")
 
     def action_export_json(self) -> None:
         """Export the currently selected message's JSON to a file."""
@@ -594,6 +658,8 @@ In-app keybindings:
     parser.add_argument("-s", "--system", default="", help="Filter by system name")
     parser.add_argument("-t", "--station", default="", help="Filter by station name")
     parser.add_argument("-S", "--schema", default="", help="Filter by schema (e.g. journal/1, commodity/3)")
+    parser.add_argument("-l", "--limit", default=DEFAULT_EVENT_LIMIT, type=int,
+                        help=f"Maximum events to store ({MIN_EVENT_LIMIT}-{MAX_EVENT_LIMIT}, default: {DEFAULT_EVENT_LIMIT})")
     parser.add_argument("--beta", action="store_true", help="Connect to beta EDDN endpoint")
     parser.add_argument("--dev", action="store_true", help="Connect to dev EDDN endpoint")
     return parser
@@ -613,12 +679,17 @@ def main():
     else:
         endpoint = EDDN_ENDPOINTS["live"]
 
+    limit = args.limit
+    if not (MIN_EVENT_LIMIT <= limit <= MAX_EVENT_LIMIT):
+        parser.error(f"--limit must be between {MIN_EVENT_LIMIT} and {MAX_EVENT_LIMIT}, got {limit}")
+
     app = EDDNTailApp(
         endpoint=endpoint,
         event_filter=args.event,
         system_filter=args.system,
         station_filter=args.station,
         schema_filter=args.schema,
+        initial_limit=limit,
     )
     app.run()
 
