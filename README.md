@@ -53,6 +53,9 @@ eddn-tail --beta
 
 # Connect to dev EDDN
 eddn-tail --dev
+
+# Show all options and examples
+eddn-tail --help
 ```
 
 ## Keybindings
