@@ -35,6 +35,8 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.css.query import NoMatches
+    from textual.timer import Timer
     from textual.widgets import DataTable, Footer, Header, Input, Static
 except ImportError:
     print("eddn_tail requires pyzmq, textual, and rich: pip install .", file=sys.stderr)
@@ -232,6 +234,8 @@ class EDDNTailApp(App):
         self._max_event_limit = initial_limit
         self._limit_input_mode = False
         self._receiver: EDDNReceiver | None = None
+        self._poll_timer: Timer | None = None
+        self._stats_timer: Timer | None = None
         self._paused = False
         self._show_detail = True
         self._msg_count = 0
@@ -275,12 +279,21 @@ class EDDNTailApp(App):
 
         # Start the receiver
         self._receiver = EDDNReceiver(self._endpoint)
-        self.set_interval(0.05, self._poll_messages)
+        self._poll_timer = self.set_interval(0.05, self._poll_messages)
 
         # Update stats and pane titles
-        self.set_interval(1.0, self._update_stats)
+        self._stats_timer = self.set_interval(1.0, self._update_stats)
 
     def on_unmount(self) -> None:
+        # Stop the timers before the widget tree goes away. A tick that lands
+        # mid-teardown would query widgets that no longer exist and raise
+        # NoMatches.
+        for timer in (self._poll_timer, self._stats_timer):
+            if timer is not None:
+                timer.stop()
+        self._poll_timer = None
+        self._stats_timer = None
+
         if self._receiver:
             self._receiver.close()
             self._receiver = None
@@ -438,8 +451,14 @@ class EDDNTailApp(App):
         """Update the stats bar."""
         elapsed = (datetime.now(timezone.utc) - self._app_start_time).total_seconds()
         rate = self._msg_count / elapsed if elapsed > 0 else 0
-        stats = self.query_one("#stats-bar", Static)
-        shown = len(table.rows) if (table := self.query_one("#message-table", DataTable)) else 0
+        try:
+            stats = self.query_one("#stats-bar", Static)
+            table = self.query_one("#message-table", DataTable)
+        except NoMatches:
+            # The interval can tick while the app is tearing down, after the
+            # widgets have gone. Nothing to update in that case.
+            return
+        shown = len(table.rows)
         status = "⏸ PAUSED" if self._paused else "▶ LIVE"
         total_dropped = self._filtered_count + self._live_hidden_count
         filter_info = ""

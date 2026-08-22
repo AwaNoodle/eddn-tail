@@ -1718,6 +1718,26 @@ class TestPilotCursorNavigation:
             assert table.cursor_row == 1
 
 
+class TestStatsBarTeardown:
+    """Regression: the stats interval must tolerate a tick after teardown.
+
+    _update_stats runs on a 1s interval for the app's whole lifetime. A tick
+    landing after the widget tree is gone raised NoMatches out of the timer,
+    which showed up as a roughly 1-in-10 flake in the pilot tests and as an
+    error on quit in the real app. The screen still exists at that point; it
+    is the widgets underneath that have gone.
+    """
+
+    async def test_update_stats_survives_missing_widgets(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            await app.query_one("#stats-bar").remove()
+            await app.query_one("#message-table").remove()
+            # The interval would call this after the widgets went away.
+            app._update_stats()
+
+
 class TestPilotSetLimit:
     """Pilot-driven tests for the alt+l set-limit prompt."""
 
