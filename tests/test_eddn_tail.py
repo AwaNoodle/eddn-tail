@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import zmq
+from textual.widgets import DataTable, Input, Static
 
 from eddn_tail import (
     DEFAULT_EVENT_LIMIT,
@@ -106,6 +108,91 @@ def _bind_zmq_pub() -> tuple:
     port = pub.bind_to_random_port("tcp://127.0.0.1")
     url = f"tcp://127.0.0.1:{port}"
     return ctx, pub, url
+
+
+class _FakeReceiver:
+    """Deterministic stand-in for EDDNReceiver used to feed a running pilot app.
+
+    recv_message() pops from a pre-supplied queue and returns None once
+    exhausted, matching EDDNReceiver's timeout behaviour, but without any
+    network I/O or slow-joiner timing to race against.
+    """
+
+    def __init__(self, messages):
+        self._queue = list(messages)
+
+    def recv_message(self):
+        if self._queue:
+            return self._queue.pop(0)
+        return None
+
+    def close(self):
+        pass
+
+
+def _raw_journal_message(system="Sol", event="Scan", body="Earth", uploader_id="cmdr1", gateway_ts="2026-05-10T22:36:19Z"):
+    """Build a raw (un-summarized) EDDN journal message dict for feeding into a pilot app."""
+    return {
+        "$schemaRef": "https://eddn.edcd.io/schemas/journal/1",
+        "header": {
+            "uploaderID": uploader_id,
+            "softwareName": "EDMC",
+            "softwareVersion": "5.0",
+            "gatewayTimestamp": gateway_ts,
+        },
+        "message": {
+            "event": event,
+            "StarSystem": system,
+            "BodyName": body,
+        },
+    }
+
+
+def _static_text(widget):
+    """Read the plain rendered text of a Static widget.
+
+    Static.content is a recent Textual API (not present at the project's
+    declared floor of textual==2.0). widget.visual (a textual.content.Content
+    instance whose __str__ returns the plain text) is available across the
+    whole supported range, so tests read through that instead.
+    """
+    return str(widget.visual)
+
+
+def _feed_messages(app, messages):
+    """Inject raw messages into a running EDDNTailApp deterministically.
+
+    Closes the real EDDNReceiver created in on_mount (to avoid leaking its
+    ZMQ socket/context) and installs a _FakeReceiver, then drives
+    _poll_messages() directly instead of waiting on the 0.05s interval -
+    this keeps the pilot tests free of sleeps and timing races.
+    """
+    if app._receiver is not None:
+        app._receiver.close()
+    app._receiver = _FakeReceiver(messages)
+    app._poll_messages()
+
+
+@contextlib.asynccontextmanager
+async def _running_app(app):
+    """Run a pilot-driven app, then neutralize its background poll interval
+    before tearing down the widget tree.
+
+    EDDNTailApp's on_mount schedules a 0.05s interval that calls
+    _poll_messages() for the app's whole lifetime. If that timer fires
+    while run_test() is mid-teardown (a real, if rare, race - the screen's
+    widgets can already be gone while the timer is still pending), it
+    raises NoMatches on '#message-table'. _poll_messages() early-returns
+    when self._receiver is falsy, so clearing it before we leave the pilot
+    context makes that exposure window harmless instead of flaky.
+    """
+    async with app.run_test() as pilot:
+        try:
+            yield pilot
+        finally:
+            if app._receiver is not None:
+                app._receiver.close()
+            app._receiver = None
 
 
 # ---------------------------------------------------------------------------
@@ -1367,3 +1454,335 @@ class TestErrorHandling:
                "header": {"uploaderID": "test"},
                "message": {"event": "Scan"}}
         assert "_error" not in msg
+
+
+# ---------------------------------------------------------------------------
+# 11. Pilot-driven tests - drive the real running Textual app
+# ---------------------------------------------------------------------------
+#
+# These tests use Textual's own harness (`async with app.run_test() as pilot`)
+# instead of the _FakeWidget stub above, so they exercise the real widget
+# tree, reactive updates, and key bindings. Messages are injected
+# deterministically via _feed_messages()/_FakeReceiver (no network, no
+# sleeps) - see the helpers above.
+#
+# Note: EDDNTailApp's own 0.05s poll interval keeps running in the
+# background for the lifetime of the app and re-applies auto-scroll
+# ("snap cursor to bottom if within 2 rows of it") on every tick, even
+# when no new messages arrive. Tests that manually position the cursor
+# use 5+ rows so the row under test isn't within that auto-scroll zone,
+# avoiding a race between the test and the app's own behaviour.
+
+
+def _five_row_messages():
+    """Five raw messages with distinct systems, in arrival order."""
+    return [
+        _raw_journal_message(system="Sol"),
+        _raw_journal_message(system="Lave"),
+        _raw_journal_message(system="Deciat", event="FSDJump"),
+        _raw_journal_message(system="Shinrarta Dezhra"),
+        _raw_journal_message(system="Alpha Centauri"),
+    ]
+
+
+class TestPilotKeybindings:
+    """Pilot-driven tests for the keybindings documented in the README."""
+
+    async def test_pause_resume_toggles_state_and_title(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            assert app._paused is False
+
+            await pilot.press("p")
+            assert app._paused is True
+            msg_pane = app.query_one("#message-pane")
+            assert "Paused" in msg_pane.border_title
+
+            await pilot.press("p")
+            assert app._paused is False
+            assert "Paused" not in msg_pane.border_title
+
+    async def test_toggle_detail_pane_visibility(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            detail_pane = app.query_one("#detail-pane")
+            assert app._show_detail is True
+            assert detail_pane.display is True
+
+            await pilot.press("d")
+            assert app._show_detail is False
+            assert detail_pane.display is False
+
+            await pilot.press("d")
+            assert app._show_detail is True
+            assert detail_pane.display is True
+
+    async def test_slash_focuses_filter_input(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            filter_bar = app.query_one("#filter-bar")
+            inp = app.query_one("#filter-input", Input)
+            assert filter_bar.display is False
+
+            await pilot.press("slash")
+            assert filter_bar.display is True
+            assert inp.can_focus is True
+            assert inp.has_focus is True
+
+    async def test_escape_clears_filter(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            await pilot.press("slash")
+            for ch in "sol":
+                await pilot.press(ch)
+            await pilot.pause()
+            assert app._live_filter == "sol"
+            assert table.row_count == 1  # only "Sol" matches
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            inp = app.query_one("#filter-input", Input)
+            filter_bar = app.query_one("#filter-bar")
+            assert app._live_filter == ""
+            assert inp.value == ""
+            assert filter_bar.display is False
+            assert table.row_count == 5  # all rows shown again
+
+    async def test_ctrl_l_clears_events(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+            assert table.row_count == 5
+
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+
+            assert table.row_count == 0
+            assert app._messages == {}
+            assert app._raw_messages == {}
+            assert app._msg_count == 0
+
+
+class TestPilotRowSelection:
+    """Pilot-driven tests for selecting a row and showing its JSON detail."""
+
+    async def test_selecting_row_shows_json_in_detail(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            table.move_cursor(row=0)  # row 0 ("Sol") - not in the auto-scroll zone with 5 rows
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail = app.query_one("#detail-content", Static)
+            detail_text = _static_text(detail)
+            assert '"StarSystem": "Sol"' in detail_text
+            assert "Lave" not in detail_text
+            assert "Deciat" not in detail_text
+
+    async def test_selecting_different_row_updates_detail(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            table.move_cursor(row=1)  # row 1 ("Lave")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail = app.query_one("#detail-content", Static)
+            assert '"StarSystem": "Lave"' in _static_text(detail)
+
+
+class TestPilotLiveFilterInteractive:
+    """Pilot-driven tests for the interactive live filter (typed via '/')."""
+
+    async def test_typing_filter_hides_non_matching_rows(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+            assert table.row_count == 5
+
+            await pilot.press("slash")
+            for ch in "deciat":
+                await pilot.press(ch)
+            await pilot.pause()
+
+            assert table.row_count == 1
+            assert app._live_hidden_count == 4
+
+    async def test_live_filter_discards_non_matching_arrivals(self):
+        """Per the documented design, messages that don't match an active
+        live filter are discarded on arrival - never stored, not just hidden."""
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, [_raw_journal_message(system="Sol")])
+            await pilot.pause()
+
+            await pilot.press("slash")
+            for ch in "sol":
+                await pilot.press(ch)
+            await pilot.pause()
+            assert app._live_filter == "sol"
+
+            before_keys = set(app._messages.keys())
+
+            # A matching message and a non-matching one arrive while the filter is active.
+            _feed_messages(app, [
+                _raw_journal_message(system="Solitude"),
+                _raw_journal_message(system="Deciat", event="FSDJump"),
+            ])
+            await pilot.pause()
+
+            new_summaries = [app._messages[k] for k in app._messages if k not in before_keys]
+            new_systems = {s["system"] for s in new_summaries}
+            assert "Solitude" in new_systems
+            assert "Deciat" not in new_systems  # discarded on arrival, never stored
+
+            table = app.query_one("#message-table", DataTable)
+            assert table.row_count == len(app._messages)  # every stored message is shown
+
+
+class TestPilotEventLimit:
+    """Pilot-driven tests for the FIFO event storage limit."""
+
+    async def test_fifo_limit_drops_oldest_and_stats_agree(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1", initial_limit=3)
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())  # 5 messages, limit is 3
+            await pilot.pause()
+
+            table = app.query_one("#message-table", DataTable)
+            assert table.row_count == 3
+            assert len(app._messages) == 3
+            # Oldest two (Sol, Lave) evicted; newest three remain.
+            assert set(app._messages.keys()) == {"3", "4", "5"}
+
+            app._update_stats()
+            stats = app.query_one("#stats-bar", Static)
+            stats_text = _static_text(stats)
+            assert "Limit: 3/3" in stats_text
+            assert f"Shown: {table.row_count}" in stats_text
+
+
+class TestPilotCursorNavigation:
+    """Pilot-driven tests for the up/down cursor keybindings."""
+
+    async def test_cursor_up_down_navigate_rows(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            # Row 1 is safely away from the auto-scroll zone (rows within 2 of
+            # the bottom get snapped back by the background poll interval).
+            table.move_cursor(row=1)
+            await pilot.pause()
+            assert table.cursor_row == 1
+
+            await pilot.press("down")
+            assert table.cursor_row == 2
+
+            await pilot.press("up")
+            assert table.cursor_row == 1
+
+
+class TestPilotSetLimit:
+    """Pilot-driven tests for the alt+l set-limit prompt."""
+
+    async def test_alt_l_opens_prompt_prefilled_with_current_limit(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1", initial_limit=500)
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+
+            await pilot.press("alt+l")
+            assert app._limit_input_mode is True
+            filter_bar = app.query_one("#filter-bar")
+            inp = app.query_one("#filter-input", Input)
+            assert filter_bar.display is True
+            assert inp.value == "500"
+
+    async def test_alt_l_then_enter_applies_new_limit(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1", initial_limit=500)
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+
+            await pilot.press("alt+l")
+            inp = app.query_one("#filter-input", Input)
+            inp.value = ""
+            for ch in "50":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app._max_event_limit == 50
+            assert app._limit_input_mode is False
+            filter_bar = app.query_one("#filter-bar")
+            assert filter_bar.display is False
+
+
+class TestPilotExportJson:
+    """Pilot-driven tests for the 'e' export-selected-message keybinding."""
+
+    async def test_export_json_writes_selected_message(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            table.move_cursor(row=1)  # away from the auto-scroll zone (see above)
+            await pilot.pause()
+
+            await pilot.press("e")
+            await pilot.pause()
+
+        exported = list(tmp_path.glob("eddn_export_*.json"))
+        assert len(exported) == 1
+        content = exported[0].read_text()
+        assert '"StarSystem": "Lave"' in content
+
+    async def test_export_json_no_selection_notifies_warning(self, tmp_path, monkeypatch):
+        """With no rows in the table, export should warn instead of writing a file."""
+        monkeypatch.chdir(tmp_path)
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            await pilot.press("e")
+            await pilot.pause()
+
+        assert list(tmp_path.glob("eddn_export_*.json")) == []
