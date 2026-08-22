@@ -7,9 +7,16 @@ description: Use when cutting, tagging, or publishing a release of eddn-tail - b
 
 How to cut a release of eddn-tail. The version is `version` in `pyproject.toml` and nothing else
 hardcodes it. Everything after the tag push is automated by `.github/workflows/release.yml`:
-sdist + wheel to PyPI via trusted publishing, and a GitHub Release with those two files attached.
-That is the whole distribution surface: users install with `uvx eddn-tail`, `pip install eddn-tail`,
-or by running `eddn_tail.py` from a checkout. No standalone binaries are built or shipped.
+guard checks, then sdist + wheel to PyPI via trusted publishing, then a GitHub Release with those
+two files attached. That is the whole distribution surface: users install with `uvx eddn-tail`,
+`pip install eddn-tail`, or by running `eddn_tail.py` from a checkout. No standalone binaries are
+built or shipped.
+
+Before anything is built, `release.yml` runs two guard steps (`scripts/check_release_version.py`
+and `scripts/extract_changelog.py`) that fail the run in seconds if the tag does not match
+`pyproject.toml`'s version, or if `CHANGELOG.md` has no non-empty `## [<version>]` section for the
+tag. After publishing to PyPI, `scripts/check_pypi_publish.py` reports in the job summary whether
+this run actually uploaded the version or found it already there.
 
 ## Quick reference
 
@@ -18,7 +25,8 @@ or by running `eddn_tail.py` from a checkout. No standalone binaries are built o
 | Verify | `python3 -m pytest -q` · `ruff check .` |
 | Branch | `git checkout -b <version>-release` |
 | Bump | edit `version` in `pyproject.toml` |
-| Commit | `git add pyproject.toml && git commit -m "chore: release v<version>"` |
+| Roll up changelog | rename `## [Unreleased]` to `## [<version>] - <date>` in `CHANGELOG.md`, add a fresh empty `## [Unreleased]` above it |
+| Commit | `git add pyproject.toml CHANGELOG.md && git commit -m "chore: release v<version>"` |
 | PR | `gh pr create --title "chore: release v<version>"` |
 | Gate | Wait for the Build workflow to pass on the PR |
 | Merge | Merge into `main` |
@@ -34,6 +42,8 @@ or by running `eddn_tail.py` from a checkout. No standalone binaries are built o
 - The `release` environment exists on the repo with PyPI trusted publishing configured for the
   `eddn-tail` project. Without it the publish step fails at OIDC, after the tag exists.
 - Nothing else needs bumping. `version` in `pyproject.toml` is the only place the number lives.
+- `CHANGELOG.md` has something under `## [Unreleased]` to roll up. If it is empty, the changelog
+  guard fails the release before it builds anything.
 
 ## Choosing the version
 
@@ -48,11 +58,17 @@ The tag pattern in `release.yml` is `v[0-9]+.[0-9]+.[0-9]+`, so pre-release and 
 
 1. Branch off up-to-date `main`: `git checkout -b <version>-release`.
 
-2. Edit `version` in `pyproject.toml`. Change nothing else in the commit.
+2. Edit `version` in `pyproject.toml`.
 
-3. Commit: `git add pyproject.toml && git commit -m "chore: release v<version>"`.
+3. Roll up `CHANGELOG.md`: rename `## [Unreleased]` to `## [<version>] - <date>` and add a fresh
+   empty `## [Unreleased]` above it. Write the entries in Keep a Changelog style, user-facing and
+   brief - this section's body is what `release.yml` extracts verbatim as the GitHub Release notes,
+   so it is read by users, not just contributors. A missing or empty section for the tagged version
+   fails the release before it builds anything.
 
-4. Open the PR (`chore: release v<version>`). Body should state the version bump, a one-line
+4. Commit: `git add pyproject.toml CHANGELOG.md && git commit -m "chore: release v<version>"`.
+
+5. Open the PR (`chore: release v<version>`). Body should state the version bump, a one-line
    summary of what is in the release, and the local verification results.
 
    **Wait for the Build workflow to go green before merging.** `.github/workflows/build.yml` runs
@@ -64,7 +80,7 @@ The tag pattern in `release.yml` is `v[0-9]+.[0-9]+.[0-9]+`, so pre-release and 
    Direct-to-main is possible but gives up the gate - Build then runs after the push, so a red
    result arrives with the commit already on `main`.
 
-5. Merge. If you squash, the branch commit is discarded, so tag the commit that actually lands on
+6. Merge. If you squash, the branch commit is discarded, so tag the commit that actually lands on
    `main`, not the branch. Nothing enforces this: a tag on any commit will build and publish.
    Let Build go green on the merge push before tagging.
 
@@ -78,14 +94,21 @@ git push --tags
 
 `git push` alone does not push tags. Without `--tags` nothing runs and there is no failure to see.
 
-The tag triggers `release.yml`, which builds the sdist and wheel, publishes to PyPI, creates the
-GitHub Release with **auto-generated notes from commit subjects**, attaching the sdist and wheel
-(`files: dist/*`). Because the notes come from commit subjects, sloppy subjects since the last tag
-become the public release notes; skim
-`git log v<previous>..main --oneline` before tagging and be ready to edit the notes afterwards with
-`gh release edit`.
+The tag triggers `release.yml`, which:
 
-Watch the run: `gh run watch` or `gh run list --workflow=release.yml`.
+1. Verifies the tag matches `pyproject.toml`'s version (`scripts/check_release_version.py`) -
+   fails in seconds if not, before anything builds.
+2. Extracts the `## [<version>]` section from `CHANGELOG.md` (`scripts/extract_changelog.py`) -
+   fails in seconds if that section is missing or empty.
+3. Builds the sdist and wheel.
+4. Publishes to PyPI (`skip-existing: true`, so a retry of a partially-failed release is not a hard
+   error), then runs `scripts/check_pypi_publish.py` to report in the job summary whether this run
+   actually uploaded the version or found it already there.
+5. Creates the GitHub Release, attaching the sdist and wheel (`files: dist/*`), using the extracted
+   changelog section as the release body - no more auto-generated notes from commit subjects.
+
+Watch the run: `gh run watch` or `gh run list --workflow=release.yml`. The job summary is the
+fastest way to see whether PyPI actually got a new upload.
 
 ## Verifying
 
@@ -94,8 +117,9 @@ Watch the run: `gh run watch` or `gh run list --workflow=release.yml`.
   throwaway venv followed by `eddn-tail --help`. This is the install path users actually take, and
   it is the only check that the published wheel is importable and its entry point resolves.
 - The PyPI project page shows `<version>` as the current release.
-- Nothing in CI checks that the tag matches `pyproject.toml`, so confirm by eye that the published
-  version is the one you meant.
+- The job summary for the release run states plainly whether it published `<version>` or found it
+  already on PyPI (see Recovery below) - check it before assuming a green run means an upload
+  happened.
 
 ## Recovery
 
@@ -117,23 +141,27 @@ Fix the cause on a new PR, merge, then tag and push again.
 **Run failed after PyPI but before or during the GitHub Release.** The number is spent.
 Do not retag: anyone who fetched the tag keeps the old commit, and a moved tag is worse than a
 skipped number. Re-running the workflow is safe for the PyPI step specifically, because
-`skip-existing: true` makes a duplicate upload a no-op - but see the trap below.
+`skip-existing: true` makes a duplicate upload a no-op, and the re-run's job summary will say
+`<version>` already existed and nothing new was uploaded, so you can tell at a glance that this run
+did not publish anything - it is just letting the rest of the workflow (GitHub Release) complete.
 
-**Uncertain how far it got:** check the PyPI project page first, then `gh release view v<version>`.
-PyPI is the irreversible half, so it decides whether the number is spent.
+**Uncertain how far it got:** check the job summary for the run first - it states whether PyPI got
+a new upload or already had the version - then the PyPI project page, then
+`gh release view v<version>`. PyPI is the irreversible half, so it decides whether the number is
+spent.
 
 ## Common mistakes
 
 | Mistake | Consequence |
 |---|---|
-| Tagging without bumping `pyproject.toml` | Not caught - no guard compares the tag to the version. The wheel publishes under the *old* version, and with `skip-existing: true` the run goes green having uploaded nothing |
-| Re-tagging after a failed release, assuming the retry republishes | Not caught - `skip-existing: true` means an already-present version is skipped silently and the run is green. Always confirm the PyPI page, not the workflow status |
+| Tagging without bumping `pyproject.toml` | Caught by CI - `scripts/check_release_version.py` compares the tag to `pyproject.toml`'s version and fails within seconds, before anything builds or publishes |
+| Re-tagging after a failed release, assuming the retry republishes | Still not a hard failure by design (a legitimate retry must succeed), but no longer silent - `scripts/check_pypi_publish.py` reports "published" vs "already existed, nothing uploaded" in the job summary, so you no longer have to guess |
 | Tagging on the release branch after a squash merge | Not caught - it builds and publishes from a commit that is not on `main` |
 | A pre-release-style tag (`v1.0.0rc1`) | Not caught as a failure - the tag pattern simply does not match, so no workflow runs at all |
 | Pushing with `git push` only | Not caught - tags are not pushed by default, so nothing runs |
 | Merging the release PR on a red Build | Not caught - the same failure recurs on the tag, after the tag exists |
 | Assuming Build validates packaging | Not caught - Build never runs `python -m build`, so packaging breaks surface only post-tag |
-| Untidy commit subjects since the last tag | Not caught - they become the release notes verbatim. Edit afterwards with `gh release edit --notes` |
+| Forgetting to roll up `CHANGELOG.md` before tagging | Caught by CI - `scripts/extract_changelog.py` fails within seconds if the `## [<version>]` section is missing or empty. It does not judge the *quality* of the entry, only that one exists |
 | Creating the GitHub Release by hand, then pushing the tag | The workflow's `softprops/action-gh-release` step will overwrite it |
 
 ## Known gaps
@@ -141,8 +169,14 @@ PyPI is the irreversible half, so it decides whether the number is spent.
 These are unguarded today. If a release ever goes wrong in one of these ways, the durable fix is a
 CI check, not more care:
 
-- No tag-vs-`pyproject.toml` version check before the build.
-- `skip-existing: true` turns "already published" into a silent green, which hides a botched retry.
-- No changelog. Notes are generated from commit subjects, so note quality tracks commit hygiene.
+- Tagging a commit that is not on `main` (e.g. the release branch after a squash merge) still
+  builds and publishes from it. No guard checks the tag's ancestry.
+- A pre-release-style tag (`v1.0.0rc1`) does not trigger the workflow at all, silently.
 - No CI smoke test that the published wheel installs and runs - Verifying above covers this
   manually, after the fact.
+- `scripts/check_pypi_publish.py` depends on the public `https://pypi.org/pypi/<project>/json`
+  endpoint. A transient failure or outage there fails the whole run even if the actual PyPI publish
+  succeeded - it does not retry.
+- The changelog guard only checks that the `## [<version>]` section exists and is non-empty, not
+  that its content is accurate or well-written. Garbage in the changelog still ships as the release
+  notes verbatim.

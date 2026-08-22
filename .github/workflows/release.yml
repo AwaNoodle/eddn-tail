@@ -20,6 +20,21 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Verify tag matches pyproject.toml version
+        run: python3 scripts/check_release_version.py "${{ github.ref_name }}"
+
+      - name: Extract changelog section for this version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python3 scripts/extract_changelog.py "$VERSION" > release_notes.md
+
+      - name: Check PyPI publish state before publishing
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python3 scripts/check_pypi_publish.py pre "$VERSION"
+
       - name: Install build tools
         run: pip install build
 
@@ -32,8 +47,14 @@ jobs:
           trusted-publishing: true
           skip-existing: true
 
+      - name: Verify PyPI publish outcome
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python3 scripts/check_pypi_publish.py post "$VERSION"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: release_notes.md
