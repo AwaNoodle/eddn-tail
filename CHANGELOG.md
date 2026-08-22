@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.4.0] - 2026-08-22
 
-- The stats bar refresh no longer raises when its 1 second interval ticks
-  while the app is shutting down. The widgets can already be gone at that
-  point; the tick is now a no-op instead of an error on quit. This also
-  removes a roughly 1-in-10 flake in the UI test suite.
+### Added
+
+- The detail pane now shows the selected message's JSON with syntax
+  highlighting - keys, strings, numbers, booleans, and nulls are each
+  coloured distinctly, using Rich's theme-aware defaults so it reads well on
+  both light and dark terminals. Exporting a message (`e`) still writes plain,
+  uncoloured JSON to disk.
 
 ### Fixed
 
@@ -27,21 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raised the `rich` floor to 13.3.3, which textual 2.0 itself requires. The
   previous combination of `rich>=13.0` with a correct textual floor was not
   resolvable.
+- The stats bar refresh no longer raises when its 1 second interval ticks
+  while the app is shutting down. The widgets can already be gone by then; the
+  tick is now a no-op instead of an error on quit.
 
-### Added
+### Internal
 
-- The detail pane now shows the selected message's JSON with syntax
-  highlighting - keys, strings, numbers, booleans, and nulls are each
-  coloured distinctly, using Rich's theme-aware defaults so it reads well on
-  both light and dark terminals. Exporting a message (`e`) still writes plain,
-  uncoloured JSON to disk.
-- A `test-floor` build job that installs the declared dependency floors and
-  runs the test suite against them, so floor drift is caught automatically.
 - Pilot-driven tests that drive a real running Textual app, covering the
   keybindings, row selection, the live filter, and the FIFO event limit.
-  Coverage rises from 53% to 89%. `pytest-asyncio` returns as a dev
-  dependency (with `asyncio_mode = "auto"`), since Textual's `run_test()`
-  harness is async.
+  Coverage rises from 53% to 89%.
+- A `test-floor` build job that installs the declared dependency floors and
+  runs the test suite against them, so floor drift is caught automatically.
+- Release guards: the tag is checked against `pyproject.toml`, the changelog
+  section must exist, and a PyPI publish is distinguished from a skip.
 
 ## [0.3.0] - 2026-05-15
 
