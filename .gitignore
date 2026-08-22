@@ -11,3 +11,6 @@ build/
 .ruff_cache/
 .tox/
 *.so
+.coverage
+.coverage.*
+htmlcov/
