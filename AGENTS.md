@@ -10,6 +10,7 @@ tests/test_eddn_tail.py   # entire test suite (125 tests, pytest)
 pyproject.toml            # hatchling build, deps, console script `eddn-tail`
 .github/workflows/        # build.yml (test + lint), release.yml (tag -> PyPI + binaries)
 demo.tape / demo.gif      # VHS demo recording (GIF is Git LFS)
+.claude/skills/releasing/  # release runbook (invoke with /releasing)
 ```
 
 ## App structure (`eddn_tail.py`)
@@ -31,17 +32,22 @@ Conventions: no runtime config files, no logging framework, no async beyond Text
 ```bash
 pip install -e ".[dev]"
 python3 -m pytest        # 125 tests, ~2s, no network required (tests bind a local ZMQ PUB socket)
-ruff check .             # must be clean; CI runs it with default rules (no config in pyproject)
+ruff check .             # must be clean
+pytest --cov=eddn_tail --cov-report=term-missing   # coverage, currently ~53%
 python3 eddn_tail.py     # run from source
 python3 -m build         # sdist + wheel into dist/
 ```
 
-CI (`build.yml`) runs pytest on Python 3.9-3.13 and ruff on 3.13, for pushes and PRs to `main`. `requires-python = ">=3.9"`, so no 3.10+ syntax (`match`, `X | Y` annotations at runtime; `from __future__ import annotations` is already imported).
+Config lives in `pyproject.toml`: `[tool.ruff]` (py39 target, line-length 160, rules `E,F,W,I,B,C4,UP`), `[tool.pytest.ini_options]` (`--strict-markers --strict-config`, `filterwarnings = ["error"]`, so any new warning fails the suite), and `[tool.coverage.*]`. Ruff is pinned exactly (`ruff==0.15.12`) in the `dev` extra and CI installs it from there, so bumping ruff is a one-line change in `pyproject.toml`. There is no coverage gate; the misses are concentrated in the Textual UI layer (`_poll_messages`, `_refresh_table`, the event and `action_*` handlers) and `main()`, none of which is driven by a real app instance today - Textual's `run_test()` pilot is the way in if that changes.
+
+CI (`build.yml`) runs pytest with coverage on Python 3.9-3.13 and ruff on 3.13, for pushes and PRs to `main`. `requires-python = ">=3.9"`, so no 3.10+ syntax. Annotations are the exception: `X | None` is used throughout and is valid only because both `eddn_tail.py` and the test module start with `from __future__ import annotations` - do not remove that import. Pyupgrade (`UP`) will flag `Optional[X]` if you reintroduce it.
 
 ## Release
 
 1. Bump `version` in `pyproject.toml` (single source of truth; nothing else hardcodes it).
 2. Commit on `main`, ensure CI is green.
-3. Tag `vX.Y.Z` (must match `v[0-9]+.[0-9]+.[0-9]+`) and push the tag.
+3. Tag `vX.Y.Z` (must match `v[0-9]+.[0-9]+.[0-9]+`) and push the tag with `git push --tags`.
 
 `release.yml` then builds the sdist/wheel, publishes to PyPI via trusted publishing (OIDC, `release` environment, `skip-existing`), creates a GitHub Release with generated notes, and attaches PyInstaller one-file binaries for Linux/macOS/Windows.
+
+Full runbook, including the unguarded failure modes (nothing checks the tag against `pyproject.toml`, and `skip-existing` turns a botched retry into a green run), is in `.claude/skills/releasing/SKILL.md` - invoke it with `/releasing`.
