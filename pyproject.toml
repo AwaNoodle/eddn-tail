@@ -1,6 +1,6 @@
 [project]
 name = "eddn-tail"
-version = "0.3.0"
+version = "0.4.0"
 description = "A KinesisTail-like TUI for monitoring the EDDN live stream"
 readme = "README.md"
 license = "MIT"

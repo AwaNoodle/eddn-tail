@@ -188,8 +188,8 @@ a check in the release workflow, not more care:
 - No automated smoke test that the published wheel installs and runs - Verifying above covers this
   manually, after the fact.
 - `scripts/check_pypi_publish.py` depends on the public `https://pypi.org/pypi/<project>/json`
-  endpoint. A transient failure or outage there fails the whole run even if the actual PyPI publish
-  succeeded - it does not retry.
+  endpoint. It polls for ~80s to ride out CDN lag, but a longer outage there still fails the whole
+  run even if the actual PyPI publish succeeded.
 - The changelog guard only checks that the `## [<version>]` section exists and is non-empty, not
   that its content is accurate or well-written. Garbage in the changelog still ships as the release
   notes verbatim.
