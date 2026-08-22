@@ -159,6 +159,23 @@ def _static_text(widget):
     return str(widget.visual)
 
 
+def _detail_plain_text(widget):
+    """Read the plain (uncoloured) text of the detail pane's rich.json.JSON renderable.
+
+    The detail pane is updated with a rich.json.JSON instance (not a plain string),
+    so str(widget.visual) - which works for plain-text Static widgets - would return
+    a repr of the wrapping Visual object instead of the JSON text. Textual wraps any
+    non-Content renderable passed to Static.update() in a RichVisual whose
+    `_renderable` attribute is the original object we passed in; this holds across
+    both the project's textual floor (2.0) and current releases, even though the
+    private attribute Static itself uses to stash that object differs between them.
+    rich.json.JSON implements __rich__() by returning its highlighted `.text` (a
+    rich.text.Text), so Textual's visualize() stores that Text as `_renderable`
+    directly; `.plain` gives the underlying string with no colour/markup applied.
+    """
+    return widget.visual._renderable.plain
+
+
 def _feed_messages(app, messages):
     """Inject raw messages into a running EDDNTailApp deterministically.
 
@@ -1594,7 +1611,7 @@ class TestPilotRowSelection:
             await pilot.pause()
 
             detail = app.query_one("#detail-content", Static)
-            detail_text = _static_text(detail)
+            detail_text = _detail_plain_text(detail)
             assert '"StarSystem": "Sol"' in detail_text
             assert "Lave" not in detail_text
             assert "Deciat" not in detail_text
@@ -1614,7 +1631,61 @@ class TestPilotRowSelection:
             await pilot.pause()
 
             detail = app.query_one("#detail-content", Static)
-            assert '"StarSystem": "Lave"' in _static_text(detail)
+            assert '"StarSystem": "Lave"' in _detail_plain_text(detail)
+
+    async def test_json_with_square_brackets_is_not_swallowed_as_markup(self):
+        """Regression test: square brackets in JSON values must not be interpreted
+        as Rich markup tags and silently eaten. rich.json.JSON renders the JSON as
+        a Text renderable rather than parsing it as markup, so this must survive."""
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            raw = _raw_journal_message(system="Sol")
+            raw["message"]["Factions"] = "[Faction One] and [Faction Two]"
+            _feed_messages(app, [raw])
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail = app.query_one("#detail-content", Static)
+            detail_text = _detail_plain_text(detail)
+            assert "[Faction One] and [Faction Two]" in detail_text
+
+    async def test_detail_pane_renders_with_colour(self):
+        """The detail pane's renderable must actually carry syntax highlighting
+        (distinct styles for keys/strings/etc), not just plain text. We render it
+        through a Rich Console forced to terminal mode and check ANSI escape
+        sequences are present - without pinning to specific colour codes, which
+        would be brittle across Rich versions."""
+        from rich.console import Console
+
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        async with _running_app(app) as pilot:
+            await pilot.pause()
+            _feed_messages(app, _five_row_messages())
+            await pilot.pause()
+            table = app.query_one("#message-table", DataTable)
+
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail = app.query_one("#detail-content", Static)
+            renderable = detail.visual._renderable
+
+        console = Console(force_terminal=True, color_system="standard", width=80)
+        with console.capture() as capture:
+            console.print(renderable)
+        output = capture.get()
+
+        assert "\x1b[" in output, f"expected ANSI escape codes in coloured output, got: {output!r}"
 
 
 class TestPilotLiveFilterInteractive:
@@ -1775,6 +1846,11 @@ class TestPilotExportJson:
         assert len(exported) == 1
         content = exported[0].read_text()
         assert '"StarSystem": "Lave"' in content
+        # The exported file must stay plain, uncoloured JSON - never ANSI escapes
+        # or Rich markup - even though the detail pane now shows syntax highlighting.
+        assert "\x1b[" not in content
+        parsed = json.loads(content)  # raises if it's not valid, parseable JSON
+        assert parsed["message"]["StarSystem"] == "Lave"
 
     async def test_export_json_no_selection_notifies_warning(self, tmp_path, monkeypatch):
         """With no rows in the table, export should warn instead of writing a file."""

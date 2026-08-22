@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 import zmq
 
 try:
-    from rich.markup import escape as rich_escape
+    from rich.json import JSON as RichJSON
     from textual import on
     from textual.app import App, ComposeResult
     from textual.binding import Binding
@@ -464,10 +464,12 @@ class EDDNTailApp(App):
         if msg_key is not None and msg_key in self._raw_messages:
             raw = self._raw_messages[msg_key]
             detail = self.query_one("#detail-content", Static)
-            # Escape Rich markup in JSON (brackets are interpreted as tags)
             raw_json = self._format_raw_json(raw)
-            # Show only the raw JSON - no header, no truncation
-            detail.update(rich_escape(raw_json))
+            # Render as a syntax-highlighted rich.json.JSON renderable (not a plain
+            # string) so square brackets in the JSON are never mistaken for Rich
+            # markup tags, and so keys/strings/numbers/booleans/nulls get distinct
+            # theme-aware colors from Rich's built-in JSON highlighter.
+            detail.update(RichJSON(raw_json, indent=2, ensure_ascii=False))
             # Scroll detail pane back to top for new selection
             self.query_one("#detail-pane", VerticalScroll).scroll_home(animate=False)
 
