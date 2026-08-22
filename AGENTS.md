@@ -27,6 +27,17 @@ demo.tape / demo.gif      # VHS demo recording (GIF is Git LFS)
 
 Conventions: no runtime config files, no logging framework, no async beyond Textual's own loop. Rich markup goes into table cells, so escape any user/wire-derived string with `rich_escape`.
 
+## Contributing
+
+All work happens on a branch and reaches `main` through a pull request. `main` is protected: direct
+pushes are rejected, and a PR must have the Build checks green (pytest on 3.9-3.13, ruff on 3.13)
+before it can merge. Merges go through GitHub's merge queue, which re-runs those checks against the
+result of the merge rather than against the branch in isolation, so a PR that was green in isolation
+can still fail in the queue and be ejected. Branch naming is not enforced; keep it short and
+descriptive.
+
+This applies to release commits too - see the Release section.
+
 ## Build & test
 
 ```bash
