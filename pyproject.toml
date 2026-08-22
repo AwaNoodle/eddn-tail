@@ -33,7 +33,7 @@ Repository = "https://github.com/AwaNoodle/eddn-tail"
 Issues = "https://github.com/AwaNoodle/eddn-tail/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff==0.15.12"]
 
 [project.scripts]
 eddn-tail = "eddn_tail:main"
@@ -41,3 +41,27 @@ eddn-tail = "eddn_tail:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 160
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, C4: comprehensions, UP: pyupgrade
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["eddn_tail"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

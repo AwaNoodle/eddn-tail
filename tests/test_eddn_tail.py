@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from datetime import datetime, timezone, timedelta
 import json
 import re
 import time
 import zlib
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import zmq
@@ -15,17 +15,16 @@ import zmq
 from eddn_tail import (
     DEFAULT_EVENT_LIMIT,
     EDDN_ENDPOINTS,
-    EDDNReceiver,
-    EDDNTailApp,
     MAX_EVENT_LIMIT,
     MIN_EVENT_LIMIT,
     SCHEMA_COLORS,
     SCHEMA_EVENT,
     SCHEMA_SHORT,
+    EDDNReceiver,
+    EDDNTailApp,
     build_parser,
     extract_summary,
 )
-
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

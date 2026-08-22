@@ -21,23 +21,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import zlib
-from datetime import datetime, timezone
-from typing import Optional
-
-import re
 from collections import OrderedDict
+from datetime import datetime, timezone
 
 import zmq
 
 try:
+    from rich.markup import escape as rich_escape
     from textual import on
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
-    from textual.widgets import Footer, Header, Input, Static, DataTable
-    from rich.markup import escape as rich_escape
+    from textual.widgets import DataTable, Footer, Header, Input, Static
 except ImportError:
     print("eddn_tail requires pyzmq, textual, and rich: pip install .", file=sys.stderr)
     sys.exit(1)
@@ -83,7 +81,7 @@ class EDDNReceiver:
         self._sock.setsockopt_string(zmq.SUBSCRIBE, topic_filter)
         self._sock.RCVTIMEO = 100  # ms — short timeout for responsive cancellation
 
-    def recv_message(self) -> Optional[dict]:
+    def recv_message(self) -> dict | None:
         """Receive a single message. Returns None on timeout."""
         try:
             raw = self._sock.recv()
@@ -233,14 +231,14 @@ class EDDNTailApp(App):
         self._schema_filter = schema_filter.lower()
         self._max_event_limit = initial_limit
         self._limit_input_mode = False
-        self._receiver: Optional[EDDNReceiver] = None
+        self._receiver: EDDNReceiver | None = None
         self._paused = False
         self._show_detail = True
         self._msg_count = 0
         self._filtered_count = 0
         self._app_start_time = datetime.now(timezone.utc)
         self._live_filter = ""
-        self._live_filter_pattern: Optional[re.Pattern] = None
+        self._live_filter_pattern: re.Pattern | None = None
         self._messages: OrderedDict[str, dict] = OrderedDict()
         self._raw_messages: OrderedDict[str, dict] = OrderedDict()
         self._live_hidden_count = 0
@@ -287,7 +285,7 @@ class EDDNTailApp(App):
             self._receiver.close()
             self._receiver = None
 
-    def _compile_live_filter(self) -> Optional[re.Pattern]:
+    def _compile_live_filter(self) -> re.Pattern | None:
         """Compile the live filter string into a regex pattern, or None if invalid."""
         if not self._live_filter:
             return None
