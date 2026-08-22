@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EDDN Tail — A KinesisTail-like TUI for monitoring the EDDN live stream.
+EDDN Tail - A KinesisTail-like TUI for monitoring the EDDN live stream.
 
 Connects to the EDDN ZeroMQ PUB/SUB relay, decompresses messages,
 and displays them in a filterable terminal UI.
@@ -79,7 +79,7 @@ class EDDNReceiver:
         self._sock = self._ctx.socket(zmq.SUB)
         self._sock.connect(endpoint)
         self._sock.setsockopt_string(zmq.SUBSCRIBE, topic_filter)
-        self._sock.RCVTIMEO = 100  # ms — short timeout for responsive cancellation
+        self._sock.RCVTIMEO = 100  # ms - short timeout for responsive cancellation
 
     def recv_message(self) -> dict | None:
         """Receive a single message. Returns None on timeout."""
@@ -108,11 +108,11 @@ def extract_summary(msg: dict) -> dict:
     # Schema short name (needed for derived event names)
     schema_short = SCHEMA_SHORT.get(schema_ref, "/".join(schema_ref.rsplit("/", 2)[-2:]) if schema_ref.count("/") >= 2 else schema_ref)
 
-    # Extract event type — for journal schemas, use the event field;
+    # Extract event type - for journal schemas, use the event field;
     # for non-journal schemas, derive from schema name
     event = message.get("event", "") or SCHEMA_EVENT.get(schema_short, "")
 
-    # Extract system/station — journal uses StarSystem/StationName (capitalized),
+    # Extract system/station - journal uses StarSystem/StationName (capitalized),
     # non-journal schemas use systemName/stationName (lowercase)
     system = message.get("StarSystem", message.get("SystemName", message.get("systemName", "")))
     station = message.get("StationName", message.get("stationName", ""))
@@ -324,7 +324,7 @@ class EDDNTailApp(App):
     def _matches_cli_filters(self, summary: dict) -> bool:
         """Check if a message matches the CLI filters (--event, --system, etc.).
 
-        These are static filters set at startup — messages that fail
+        These are static filters set at startup - messages that fail
         are permanently discarded and never stored.
         """
         if self._event_filter and self._event_filter not in summary["event"].lower():
@@ -466,7 +466,7 @@ class EDDNTailApp(App):
             detail = self.query_one("#detail-content", Static)
             # Escape Rich markup in JSON (brackets are interpreted as tags)
             raw_json = self._format_raw_json(raw)
-            # Show only the raw JSON — no header, no truncation
+            # Show only the raw JSON - no header, no truncation
             detail.update(rich_escape(raw_json))
             # Scroll detail pane back to top for new selection
             self.query_one("#detail-pane", VerticalScroll).scroll_home(animate=False)
@@ -500,7 +500,7 @@ class EDDNTailApp(App):
                 event.input.value = ""
                 event.input.placeholder = "Filter: event, system, station, uploader, schema (regex supported)..."
                 self._limit_input_mode = False
-            # else: normal filter — value already applied via Input.Changed
+            # else: normal filter - value already applied via Input.Changed
             event.input.can_focus = False
             self.query_one("#filter-bar").display = False
             self.query_one("#message-table", DataTable).focus()
@@ -633,7 +633,7 @@ class EDDNTailApp(App):
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the argument parser for eddn-tail."""
     parser = argparse.ArgumentParser(
-        description="EDDN Tail — monitor the EDDN live stream in your terminal",
+        description="EDDN Tail - monitor the EDDN live stream in your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -647,7 +647,7 @@ Examples:
 Note on uploaderID:
   EDDN relays hash uploaderID values before broadcast (SHA-1 with a
   rotating nonce that changes every 3 minutes), so the Uploader column
-  shows 40-character hex strings — not commander names. Since the hash
+  shows 40-character hex strings - not commander names. Since the hash
   rotates, -u filtering is unreliable and has been removed. Use the
   live filter (/) for short-term matching on any column value.
 
