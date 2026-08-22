@@ -8,7 +8,7 @@ TUI (Textual) that tails the EDDN ZeroMQ stream. Single-module app.
 eddn_tail.py              # entire application (~700 lines)
 tests/test_eddn_tail.py   # entire test suite (125 tests, pytest)
 pyproject.toml            # hatchling build, deps, console script `eddn-tail`
-.github/workflows/        # build.yml (test + lint), release.yml (tag -> PyPI + binaries)
+.github/workflows/        # build.yml (test + lint), release.yml (tag -> PyPI + GitHub Release)
 demo.tape / demo.gif      # VHS demo recording (GIF is Git LFS)
 .claude/skills/releasing/  # release runbook (invoke with /releasing)
 ```
@@ -48,6 +48,6 @@ CI (`build.yml`) runs pytest with coverage on Python 3.9-3.13 and ruff on 3.13, 
 2. Commit on `main`, ensure CI is green.
 3. Tag `vX.Y.Z` (must match `v[0-9]+.[0-9]+.[0-9]+`) and push the tag with `git push --tags`.
 
-`release.yml` then builds the sdist/wheel, publishes to PyPI via trusted publishing (OIDC, `release` environment, `skip-existing`), creates a GitHub Release with generated notes, and attaches PyInstaller one-file binaries for Linux/macOS/Windows.
+`release.yml` then builds the sdist/wheel, publishes to PyPI via trusted publishing (OIDC, `release` environment, `skip-existing`), and creates a GitHub Release with generated notes and those two files attached. PyPI is the only distribution channel; users run the tool via `uvx eddn-tail`, a `pip install`, or straight from a checkout.
 
 Full runbook, including the unguarded failure modes (nothing checks the tag against `pyproject.toml`, and `skip-existing` turns a botched retry into a green run), is in `.claude/skills/releasing/SKILL.md` - invoke it with `/releasing`.

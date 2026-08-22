@@ -7,8 +7,9 @@ description: Use when cutting, tagging, or publishing a release of eddn-tail - b
 
 How to cut a release of eddn-tail. The version is `version` in `pyproject.toml` and nothing else
 hardcodes it. Everything after the tag push is automated by `.github/workflows/release.yml`:
-sdist + wheel to PyPI via trusted publishing, a GitHub Release, then one-file PyInstaller binaries
-for Linux, macOS, and Windows attached to that Release.
+sdist + wheel to PyPI via trusted publishing, and a GitHub Release with those two files attached.
+That is the whole distribution surface: users install with `uvx eddn-tail`, `pip install eddn-tail`,
+or by running `eddn_tail.py` from a checkout. No standalone binaries are built or shipped.
 
 ## Quick reference
 
@@ -57,7 +58,7 @@ The tag pattern in `release.yml` is `v[0-9]+.[0-9]+.[0-9]+`, so pre-release and 
    **Wait for the Build workflow to go green before merging.** `.github/workflows/build.yml` runs
    pytest on Python 3.9 to 3.13 and ruff on 3.13 for every PR to `main`. It is the only automated
    gate before the tag, and it does not exercise the release path at all: it never runs
-   `python -m build`, never touches PyPI, and never runs PyInstaller. A packaging break passes
+   `python -m build` and never touches PyPI. A packaging break passes
    Build clean and only surfaces after the tag is pushed.
 
    Direct-to-main is possible but gives up the gate - Build then runs after the push, so a red
@@ -78,9 +79,9 @@ git push --tags
 `git push` alone does not push tags. Without `--tags` nothing runs and there is no failure to see.
 
 The tag triggers `release.yml`, which builds the sdist and wheel, publishes to PyPI, creates the
-GitHub Release with **auto-generated notes from commit subjects**, then runs the `pyinstaller` job
-(`needs: release`) to attach the three binaries. Because the notes come from commit subjects,
-sloppy subjects since the last tag become the public release notes; skim
+GitHub Release with **auto-generated notes from commit subjects**, attaching the sdist and wheel
+(`files: dist/*`). Because the notes come from commit subjects, sloppy subjects since the last tag
+become the public release notes; skim
 `git log v<previous>..main --oneline` before tagging and be ready to edit the notes afterwards with
 `gh release edit`.
 
@@ -88,23 +89,10 @@ Watch the run: `gh run watch` or `gh run list --workflow=release.yml`.
 
 ## Verifying
 
-The wheel and the binaries come from two independent build paths that share only the source: the
-wheel is `python -m build` in the `release` job, the binaries are a separate `pip install .` plus
-PyInstaller in the `pyinstaller` job. A working binary is not evidence the wheel is good, and a
-successful PyPI upload is not evidence the binaries are good - a packaging error affecting only one
-path (a hatchling include/exclude mistake in the wheel, say) leaves the other looking fine. Check
-both.
-
-- `gh release view v<version>` - notes read sensibly, and three binaries are attached
-  (`eddn-tail-linux`, `eddn-tail-macos`, `eddn-tail-windows.exe`). The binaries come from the
-  second job, so a Release with no binaries means `pyinstaller` failed after the PyPI upload
-  already succeeded.
-- Wheel: `pip install eddn-tail==<version>` in a throwaway venv, then `eddn-tail --help`. This
-  covers the wheel only, not the binaries.
-- Binary: download the one for your platform from the Release and run `--help` on it (`chmod +x`
-  first on Linux/macOS). A one-file PyInstaller binary missing a bundled dependency typically dies
-  on import at startup, so this catches that. You can only check the platform you're on; the other
-  two stay unverified by a human.
+- `gh release view v<version>` - notes read sensibly, and the sdist and wheel are attached.
+- `uvx eddn-tail@<version> --help` in a clean shell, or `pip install eddn-tail==<version>` in a
+  throwaway venv followed by `eddn-tail --help`. This is the install path users actually take, and
+  it is the only check that the published wheel is importable and its entry point resolves.
 - The PyPI project page shows `<version>` as the current release.
 - Nothing in CI checks that the tag matches `pyproject.toml`, so confirm by eye that the published
   version is the one you meant.
@@ -126,7 +114,7 @@ git tag -d v<version>
 
 Fix the cause on a new PR, merge, then tag and push again.
 
-**Run failed after PyPI but before or during the GitHub Release / binaries.** The number is spent.
+**Run failed after PyPI but before or during the GitHub Release.** The number is spent.
 Do not retag: anyone who fetched the tag keeps the old commit, and a moved tag is worse than a
 skipped number. Re-running the workflow is safe for the PyPI step specifically, because
 `skip-existing: true` makes a duplicate upload a no-op - but see the trap below.
@@ -144,7 +132,7 @@ PyPI is the irreversible half, so it decides whether the number is spent.
 | A pre-release-style tag (`v1.0.0rc1`) | Not caught as a failure - the tag pattern simply does not match, so no workflow runs at all |
 | Pushing with `git push` only | Not caught - tags are not pushed by default, so nothing runs |
 | Merging the release PR on a red Build | Not caught - the same failure recurs on the tag, after the tag exists |
-| Assuming Build validates packaging | Not caught - Build never runs `python -m build` or PyInstaller, so packaging breaks surface only post-tag |
+| Assuming Build validates packaging | Not caught - Build never runs `python -m build`, so packaging breaks surface only post-tag |
 | Untidy commit subjects since the last tag | Not caught - they become the release notes verbatim. Edit afterwards with `gh release edit --notes` |
 | Creating the GitHub Release by hand, then pushing the tag | The workflow's `softprops/action-gh-release` step will overwrite it |
 
@@ -156,5 +144,5 @@ CI check, not more care:
 - No tag-vs-`pyproject.toml` version check before the build.
 - `skip-existing: true` turns "already published" into a silent green, which hides a botched retry.
 - No changelog. Notes are generated from commit subjects, so note quality tracks commit hygiene.
-- No CI smoke test that the PyInstaller binaries actually start - Verifying above covers this
-  manually, and only for whichever platform the releaser is on.
+- No CI smoke test that the published wheel installs and runs - Verifying above covers this
+  manually, after the fact.
