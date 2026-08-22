@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The detail pane now shows the selected message's JSON with syntax
+  highlighting - keys, strings, numbers, booleans, and nulls are each
+  coloured distinctly, using Rich's theme-aware defaults so it reads well on
+  both light and dark terminals. Exporting a message (`e`) still writes plain,
+  uncoloured JSON to disk.
 - A `test-floor` build job that installs the declared dependency floors and
   runs the test suite against them, so floor drift is caught automatically.
 - Pilot-driven tests that drive a real running Textual app, covering the

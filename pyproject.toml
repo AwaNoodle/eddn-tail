@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "pyzmq>=26.1",  # first release with prebuilt wheels for Python 3.13
     "textual>=2.0,<9",  # 2.0 is the verified floor (Input.Blurred etc.); capped below the next major
-    "rich>=13.3.3",  # only used for rich.markup.escape (ancient, stable); floor matches textual's own requirement
+    "rich>=13.3.3",  # rich.json.JSON syntax highlighting; floor matches textual's own requirement
 ]
 
 [project.urls]
