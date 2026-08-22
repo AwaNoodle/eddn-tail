@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import zmq
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Input, Static
 
 from eddn_tail import (
@@ -1722,20 +1723,41 @@ class TestStatsBarTeardown:
     """Regression: the stats interval must tolerate a tick after teardown.
 
     _update_stats runs on a 1s interval for the app's whole lifetime. A tick
-    landing after the widget tree is gone raised NoMatches out of the timer,
-    which showed up as a roughly 1-in-10 flake in the pilot tests and as an
-    error on quit in the real app. The screen still exists at that point; it
-    is the widgets underneath that have gone.
+    landing once the widget tree has gone raised NoMatches out of the timer:
+    an error on quit in the real app, and an intermittent failure in the pilot
+    tests. The guard is "if the widgets are missing, do nothing", so that is
+    what is asserted here - deterministically, rather than by racing a real
+    teardown.
     """
 
-    async def test_update_stats_survives_missing_widgets(self):
+    def test_update_stats_returns_when_widgets_are_gone(self, monkeypatch):
         app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
-        async with _running_app(app) as pilot:
-            await pilot.pause()
-            await app.query_one("#stats-bar").remove()
-            await app.query_one("#message-table").remove()
-            # The interval would call this after the widgets went away.
-            app._update_stats()
+
+        def _gone(*args, **kwargs):
+            raise NoMatches("widget tree has gone")
+
+        monkeypatch.setattr(app, "query_one", _gone)
+        # Must not raise.
+        app._update_stats()
+
+    def test_update_stats_still_updates_when_widgets_exist(self):
+        app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
+        seen = {}
+
+        class _Stats:
+            def update(self, text):
+                seen["text"] = text
+
+        class _Table:
+            rows = {}
+
+        def _query(selector, *args, **kwargs):
+            return _Stats() if selector == "#stats-bar" else _Table()
+
+        app.query_one = _query
+        app._update_pane_titles = lambda: None
+        app._update_stats()
+        assert "LIVE" in seen["text"]
 
 
 class TestPilotSetLimit:
