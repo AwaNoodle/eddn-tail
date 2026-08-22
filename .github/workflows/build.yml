@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  merge_group:          # required: the merge queue runs these checks on merge_group events
+  merge_group:          # no queue today (user-owned repo); ready if this moves to an org
 
 jobs:
   test:
