@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A `test-floor` build job that installs the declared dependency floors and
   runs the test suite against them, so floor drift is caught automatically.
+- Pilot-driven tests that drive a real running Textual app, covering the
+  keybindings, row selection, the live filter, and the FIFO event limit.
+  Coverage rises from 53% to 89%. `pytest-asyncio` returns as a dev
+  dependency (with `asyncio_mode = "auto"`), since Textual's `run_test()`
+  harness is async.
 
 ## [0.3.0] - 2026-05-15
 
