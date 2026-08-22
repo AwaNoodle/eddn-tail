@@ -102,8 +102,11 @@ The tag triggers `release.yml`, which:
    fails in seconds if that section is missing or empty.
 3. Builds the sdist and wheel.
 4. Publishes to PyPI (`skip-existing: true`, so a retry of a partially-failed release is not a hard
-   error), then runs `scripts/check_pypi_publish.py` to report in the job summary whether this run
-   actually uploaded the version or found it already there.
+   error), then runs `scripts/check_pypi_publish.py`, which polls PyPI's JSON API (cache-busted,
+   up to ~80s) until the version appears, and reports in the job summary whether this run actually
+   uploaded the version or found it already there. The poll exists because PyPI's API is served
+   through a CDN and does not reflect a fresh upload instantly - a single read right after
+   publishing can wrongly say "not there yet".
 5. Creates the GitHub Release, attaching the sdist and wheel (`files: dist/*`), using the extracted
    changelog section as the release body - no more auto-generated notes from commit subjects.
 
@@ -149,6 +152,16 @@ did not publish anything - it is just letting the rest of the workflow (GitHub R
 a new upload or already had the version - then the PyPI project page, then
 `gh release view v<version>`. PyPI is the irreversible half, so it decides whether the number is
 spent.
+
+**The "Verify PyPI publish outcome" step itself failed (the run is red at or after that step).**
+This does not necessarily mean the publish failed - it means the version did not show up in PyPI's
+JSON API within the poll window (~80s), which can happen either because the publish genuinely
+failed or because PyPI's CDN was slower than that to catch up. Before treating the version as spent
+and moving to the next patch number, check
+`https://pypi.org/project/eddn-tail/` by hand: if `<version>` is there, the publish worked and only
+the visibility check was slow - re-running the workflow is safe (`skip-existing: true` makes the
+publish step a no-op, and the summary will correctly say "already existed"); if it is genuinely not
+there, treat it as the "run failed after PyPI" case above and fix forward with the next version.
 
 ## Common mistakes
 
