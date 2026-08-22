@@ -88,11 +88,23 @@ Watch the run: `gh run watch` or `gh run list --workflow=release.yml`.
 
 ## Verifying
 
+The wheel and the binaries come from two independent build paths that share only the source: the
+wheel is `python -m build` in the `release` job, the binaries are a separate `pip install .` plus
+PyInstaller in the `pyinstaller` job. A working binary is not evidence the wheel is good, and a
+successful PyPI upload is not evidence the binaries are good - a packaging error affecting only one
+path (a hatchling include/exclude mistake in the wheel, say) leaves the other looking fine. Check
+both.
+
 - `gh release view v<version>` - notes read sensibly, and three binaries are attached
   (`eddn-tail-linux`, `eddn-tail-macos`, `eddn-tail-windows.exe`). The binaries come from the
   second job, so a Release with no binaries means `pyinstaller` failed after the PyPI upload
   already succeeded.
-- `pip install eddn-tail==<version>` in a throwaway venv, then `eddn-tail --help`.
+- Wheel: `pip install eddn-tail==<version>` in a throwaway venv, then `eddn-tail --help`. This
+  covers the wheel only, not the binaries.
+- Binary: download the one for your platform from the Release and run `--help` on it (`chmod +x`
+  first on Linux/macOS). A one-file PyInstaller binary missing a bundled dependency typically dies
+  on import at startup, so this catches that. You can only check the platform you're on; the other
+  two stay unverified by a human.
 - The PyPI project page shows `<version>` as the current release.
 - Nothing in CI checks that the tag matches `pyproject.toml`, so confirm by eye that the published
   version is the one you meant.
@@ -144,4 +156,5 @@ CI check, not more care:
 - No tag-vs-`pyproject.toml` version check before the build.
 - `skip-existing: true` turns "already published" into a silent green, which hides a botched retry.
 - No changelog. Notes are generated from commit subjects, so note quality tracks commit hygiene.
-- No smoke test that the PyInstaller binaries actually start.
+- No CI smoke test that the PyInstaller binaries actually start - Verifying above covers this
+  manually, and only for whichever platform the releaser is on.
