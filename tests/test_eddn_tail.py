@@ -148,12 +148,23 @@ def _raw_journal_message(system="Sol", event="Scan", body="Earth", uploader_id="
     }
 
 
+def _static_text(widget):
+    """Read the plain rendered text of a Static widget.
+
+    Static.content is a recent Textual API (not present at the project's
+    declared floor of textual==2.0). widget.visual (a textual.content.Content
+    instance whose __str__ returns the plain text) is available across the
+    whole supported range, so tests read through that instead.
+    """
+    return str(widget.visual)
+
+
 def _feed_messages(app, messages):
     """Inject raw messages into a running EDDNTailApp deterministically.
 
     Closes the real EDDNReceiver created in on_mount (to avoid leaking its
     ZMQ socket/context) and installs a _FakeReceiver, then drives
-    _poll_messages() directly instead of waiting on the 0.05s interval —
+    _poll_messages() directly instead of waiting on the 0.05s interval -
     this keeps the pilot tests free of sleeps and timing races.
     """
     if app._receiver is not None:
@@ -169,7 +180,7 @@ async def _running_app(app):
 
     EDDNTailApp's on_mount schedules a 0.05s interval that calls
     _poll_messages() for the app's whole lifetime. If that timer fires
-    while run_test() is mid-teardown (a real, if rare, race — the screen's
+    while run_test() is mid-teardown (a real, if rare, race - the screen's
     widgets can already be gone while the timer is still pending), it
     raises NoMatches on '#message-table'. _poll_messages() early-returns
     when self._receiver is falsy, so clearing it before we leave the pilot
@@ -1446,14 +1457,14 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# 11. Pilot-driven tests — drive the real running Textual app
+# 11. Pilot-driven tests - drive the real running Textual app
 # ---------------------------------------------------------------------------
 #
 # These tests use Textual's own harness (`async with app.run_test() as pilot`)
 # instead of the _FakeWidget stub above, so they exercise the real widget
 # tree, reactive updates, and key bindings. Messages are injected
 # deterministically via _feed_messages()/_FakeReceiver (no network, no
-# sleeps) — see the helpers above.
+# sleeps) - see the helpers above.
 #
 # Note: EDDNTailApp's own 0.05s poll interval keeps running in the
 # background for the lifetime of the app and re-applies auto-scroll
@@ -1576,16 +1587,17 @@ class TestPilotRowSelection:
             table = app.query_one("#message-table", DataTable)
 
             table.focus()
-            table.move_cursor(row=0)  # row 0 ("Sol") — not in the auto-scroll zone with 5 rows
+            table.move_cursor(row=0)  # row 0 ("Sol") - not in the auto-scroll zone with 5 rows
             await pilot.pause()
 
             await pilot.press("enter")
             await pilot.pause()
 
             detail = app.query_one("#detail-content", Static)
-            assert '"StarSystem": "Sol"' in detail.content
-            assert "Lave" not in detail.content
-            assert "Deciat" not in detail.content
+            detail_text = _static_text(detail)
+            assert '"StarSystem": "Sol"' in detail_text
+            assert "Lave" not in detail_text
+            assert "Deciat" not in detail_text
 
     async def test_selecting_different_row_updates_detail(self):
         app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
@@ -1602,7 +1614,7 @@ class TestPilotRowSelection:
             await pilot.pause()
 
             detail = app.query_one("#detail-content", Static)
-            assert '"StarSystem": "Lave"' in detail.content
+            assert '"StarSystem": "Lave"' in _static_text(detail)
 
 
 class TestPilotLiveFilterInteractive:
@@ -1627,7 +1639,7 @@ class TestPilotLiveFilterInteractive:
 
     async def test_live_filter_discards_non_matching_arrivals(self):
         """Per the documented design, messages that don't match an active
-        live filter are discarded on arrival — never stored, not just hidden."""
+        live filter are discarded on arrival - never stored, not just hidden."""
         app = EDDNTailApp(endpoint="tcp://127.0.0.1:1")
         async with _running_app(app) as pilot:
             await pilot.pause()
@@ -1676,8 +1688,9 @@ class TestPilotEventLimit:
 
             app._update_stats()
             stats = app.query_one("#stats-bar", Static)
-            assert "Limit: 3/3" in stats.content
-            assert f"Shown: {table.row_count}" in stats.content
+            stats_text = _static_text(stats)
+            assert "Limit: 3/3" in stats_text
+            assert f"Shown: {table.row_count}" in stats_text
 
 
 class TestPilotCursorNavigation:
