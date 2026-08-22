@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The stats bar refresh no longer raises when its 1 second interval ticks
+  while the app is shutting down. The widgets can already be gone at that
+  point; the tick is now a no-op instead of an error on quit. This also
+  removes a roughly 1-in-10 flake in the UI test suite.
+
+### Fixed
+
 - Corrected the declared `textual` floor. The published metadata said
   `textual>=0.40`, but the app uses `Input.Blurred`, which does not exist
   before textual 2.0 - so installing alongside an older textual produced an
