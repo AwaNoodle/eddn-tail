@@ -31,9 +31,9 @@ Conventions: no runtime config files, no logging framework, no async beyond Text
 
 All work happens on a branch and reaches `main` through a pull request. `main` is protected: direct
 pushes are rejected, and a PR must have the Build checks green (pytest on 3.9-3.13, ruff on 3.13)
-before it can merge. Enforced by repository ruleset "main: PR + green CI", which also blocks branch
+before it can merge. Enforced by repository ruleset "main: PR + green build", which also blocks branch
 deletion and force-pushes. Zero approving reviews are required - GitHub does not allow self-approval,
-so requiring one would lock a solo maintainer out; the gate is the PR plus green CI, not review.
+so requiring one would lock a solo maintainer out; the gate is the PR plus a green build, not review.
 Merged branches are deleted automatically. Branch naming is not enforced; keep it short and
 descriptive.
 
@@ -55,14 +55,14 @@ python3 eddn_tail.py     # run from source
 python3 -m build         # sdist + wheel into dist/
 ```
 
-Config lives in `pyproject.toml`: `[tool.ruff]` (py39 target, line-length 160, rules `E,F,W,I,B,C4,UP`), `[tool.pytest.ini_options]` (`--strict-markers --strict-config`, `filterwarnings = ["error"]`, so any new warning fails the suite), and `[tool.coverage.*]`. Ruff is pinned exactly (`ruff==0.15.12`) in the `dev` extra and CI installs it from there, so bumping ruff is a one-line change in `pyproject.toml`. There is no coverage gate; the misses are concentrated in the Textual UI layer (`_poll_messages`, `_refresh_table`, the event and `action_*` handlers) and `main()`, none of which is driven by a real app instance today - Textual's `run_test()` pilot is the way in if that changes.
+Config lives in `pyproject.toml`: `[tool.ruff]` (py39 target, line-length 160, rules `E,F,W,I,B,C4,UP`), `[tool.pytest.ini_options]` (`--strict-markers --strict-config`, `filterwarnings = ["error"]`, so any new warning fails the suite), and `[tool.coverage.*]`. Ruff is pinned exactly (`ruff==0.15.12`) in the `dev` extra and the build workflow installs it from there, so bumping ruff is a one-line change in `pyproject.toml`. There is no coverage gate; the misses are concentrated in the Textual UI layer (`_poll_messages`, `_refresh_table`, the event and `action_*` handlers) and `main()`, none of which is driven by a real app instance today - Textual's `run_test()` pilot is the way in if that changes.
 
-CI (`build.yml`) runs pytest with coverage on Python 3.9-3.13 and ruff on 3.13, for pushes and PRs to `main`. `requires-python = ">=3.9"`, so no 3.10+ syntax. Annotations are the exception: `X | None` is used throughout and is valid only because both `eddn_tail.py` and the test module start with `from __future__ import annotations` - do not remove that import. Pyupgrade (`UP`) will flag `Optional[X]` if you reintroduce it.
+The build workflow (`build.yml`) runs pytest with coverage on Python 3.9-3.13 and ruff on 3.13, for pushes and PRs to `main`. `requires-python = ">=3.9"`, so no 3.10+ syntax. Annotations are the exception: `X | None` is used throughout and is valid only because both `eddn_tail.py` and the test module start with `from __future__ import annotations` - do not remove that import. Pyupgrade (`UP`) will flag `Optional[X]` if you reintroduce it.
 
 ## Release
 
 1. Bump `version` in `pyproject.toml` (single source of truth; nothing else hardcodes it).
-2. Commit on `main`, ensure CI is green.
+2. Land the change on `main` via PR, and ensure the build is green.
 3. Tag `vX.Y.Z` (must match `v[0-9]+.[0-9]+.[0-9]+`) and push the tag with `git push --tags`.
 
 `release.yml` then builds the sdist/wheel, publishes to PyPI via trusted publishing (OIDC, `release` environment, `skip-existing`), and creates a GitHub Release with generated notes and those two files attached. PyPI is the only distribution channel; users run the tool via `uvx eddn-tail`, a `pip install`, or straight from a checkout.

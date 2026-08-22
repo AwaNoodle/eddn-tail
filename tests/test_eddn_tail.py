@@ -1,4 +1,4 @@
-"""Tests for eddn_tail — EDDN stream TUI."""
+"""Tests for eddn_tail - EDDN stream TUI."""
 
 from __future__ import annotations
 
@@ -816,7 +816,7 @@ class TestClearEvents:
         app._msg_count = 10
         app._filtered_count = 3
 
-        # Only test the pure-state logic — mock out widget calls
+        # Only test the pure-state logic - mock out widget calls
         app.query_one = lambda selector, type=None: _FakeWidget()
         app.notify = lambda msg: None
 
@@ -1196,7 +1196,7 @@ class TestLiveFilterDiscardOnArrival:
         app._live_filter_pattern = app._compile_live_filter()
 
         initial_count = app._filtered_count
-        # Simulate the discard path — live-filtered messages do NOT increment _filtered_count
+        # Simulate the discard path - live-filtered messages do NOT increment _filtered_count
         non_matching = _scan_summary("Sol")
         if app._live_filter and not app._matches_live_filter(non_matching):
             pass  # discarded, but no _filtered_count increment

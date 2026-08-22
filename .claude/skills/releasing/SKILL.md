@@ -37,7 +37,7 @@ this run actually uploaded the version or found it already there.
 
 - Every change intended for this release is already merged into `main`.
 - `main` is pulled and the working tree is clean.
-- `python3 -m pytest -q` and `ruff check .` both pass locally. CI re-runs the tests on 3.9 through
+- `python3 -m pytest -q` and `ruff check .` both pass locally. The build workflow re-runs the tests on 3.9 through
   3.13, so a version-specific failure can still surface there.
 - The `release` environment exists on the repo with PyPI trusted publishing configured for the
   `eddn-tail` project. Without it the publish step fails at OIDC, after the tag exists.
@@ -167,25 +167,25 @@ there, treat it as the "run failed after PyPI" case above and fix forward with t
 
 | Mistake | Consequence |
 |---|---|
-| Tagging without bumping `pyproject.toml` | Caught by CI - `scripts/check_release_version.py` compares the tag to `pyproject.toml`'s version and fails within seconds, before anything builds or publishes |
+| Tagging without bumping `pyproject.toml` | Caught by the release workflow - `scripts/check_release_version.py` compares the tag to `pyproject.toml`'s version and fails within seconds, before anything builds or publishes |
 | Re-tagging after a failed release, assuming the retry republishes | Still not a hard failure by design (a legitimate retry must succeed), but no longer silent - `scripts/check_pypi_publish.py` reports "published" vs "already existed, nothing uploaded" in the job summary, so you no longer have to guess |
 | Tagging on the release branch after a squash merge | Not caught - it builds and publishes from a commit that is not on `main` |
 | A pre-release-style tag (`v1.0.0rc1`) | Not caught as a failure - the tag pattern simply does not match, so no workflow runs at all |
 | Pushing with `git push` only | Not caught - tags are not pushed by default, so nothing runs |
 | Merging the release PR on a red Build | Not caught - the same failure recurs on the tag, after the tag exists |
 | Assuming Build validates packaging | Not caught - Build never runs `python -m build`, so packaging breaks surface only post-tag |
-| Forgetting to roll up `CHANGELOG.md` before tagging | Caught by CI - `scripts/extract_changelog.py` fails within seconds if the `## [<version>]` section is missing or empty. It does not judge the *quality* of the entry, only that one exists |
+| Forgetting to roll up `CHANGELOG.md` before tagging | Caught by the release workflow - `scripts/extract_changelog.py` fails within seconds if the `## [<version>]` section is missing or empty. It does not judge the *quality* of the entry, only that one exists |
 | Creating the GitHub Release by hand, then pushing the tag | The workflow's `softprops/action-gh-release` step will overwrite it |
 
 ## Known gaps
 
 These are unguarded today. If a release ever goes wrong in one of these ways, the durable fix is a
-CI check, not more care:
+a check in the release workflow, not more care:
 
 - Tagging a commit that is not on `main` (e.g. the release branch after a squash merge) still
   builds and publishes from it. No guard checks the tag's ancestry.
 - A pre-release-style tag (`v1.0.0rc1`) does not trigger the workflow at all, silently.
-- No CI smoke test that the published wheel installs and runs - Verifying above covers this
+- No automated smoke test that the published wheel installs and runs - Verifying above covers this
   manually, after the fact.
 - `scripts/check_pypi_publish.py` depends on the public `https://pypi.org/pypi/<project>/json`
   endpoint. A transient failure or outage there fails the whole run even if the actual PyPI publish
