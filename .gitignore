@@ -11,3 +11,4 @@ build/
 .ruff_cache/
 .tox/
 *.so
+.claude/worktrees/
