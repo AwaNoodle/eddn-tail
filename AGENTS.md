@@ -31,10 +31,16 @@ Conventions: no runtime config files, no logging framework, no async beyond Text
 
 All work happens on a branch and reaches `main` through a pull request. `main` is protected: direct
 pushes are rejected, and a PR must have the Build checks green (pytest on 3.9-3.13, ruff on 3.13)
-before it can merge. Merges go through GitHub's merge queue, which re-runs those checks against the
-result of the merge rather than against the branch in isolation, so a PR that was green in isolation
-can still fail in the queue and be ejected. Branch naming is not enforced; keep it short and
+before it can merge. Enforced by repository ruleset "main: PR + green CI", which also blocks branch
+deletion and force-pushes. Zero approving reviews are required - GitHub does not allow self-approval,
+so requiring one would lock a solo maintainer out; the gate is the PR plus green CI, not review.
+Merged branches are deleted automatically. Branch naming is not enforced; keep it short and
 descriptive.
+
+There is no merge queue: it is an organization-repo feature and this repo is owned by a user
+account. Checks therefore validate a PR branch in isolation, not the post-merge result, so two
+PRs that each pass can still break `main` together. `build.yml` already carries a `merge_group`
+trigger, so enabling a queue is a settings change only, should the repo ever move to an org.
 
 This applies to release commits too - see the Release section.
 

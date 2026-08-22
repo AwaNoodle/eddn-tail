@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  merge_group:          # required: the merge queue runs these checks on merge_group events
+  merge_group:          # no queue today (user-owned repo); ready if this moves to an org
 
 jobs:
   test:
@@ -29,6 +29,25 @@ jobs:
 
       - name: Run tests with coverage
         run: pytest --cov=eddn_tail --cov-report=term-missing
+
+  test-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies at their declared floor
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install "textual==2.0" "pyzmq==26.1" "rich==13.3.3"
+
+      - name: Run tests against floor versions
+        run: pytest
 
   lint:
     runs-on: ubuntu-latest
