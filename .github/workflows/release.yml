@@ -2,10 +2,47 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    branches: [main]
+
+# Serialize runs of this workflow so two pushes to main in quick succession
+# cannot both decide "tag doesn't exist yet" and race on creating it. A
+# queued run re-checks tag existence after the one ahead of it finishes, so
+# it correctly falls through to the "already released" path if the first
+# run already tagged and published.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  # Cheap, ungated: runs on every push to main. Only decides whether a
+  # release is needed; does not touch PyPI or create anything. Kept out of
+  # the `release` environment so it never waits on human approval - only an
+  # actual publish should do that.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release_needed: ${{ steps.check.outputs.release_needed }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full tag history to check whether v<version> exists
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check whether this push needs a release
+        id: check
+        run: python3 scripts/check_release_needed.py
+
+  # Gated by the `release` environment (required reviewers, once configured
+  # there). Only runs when `check` found an unreleased version bump.
   release:
+    needs: check
+    if: needs.check.outputs.release_needed == 'true'
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -14,26 +51,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Verify tag matches pyproject.toml version
-        run: python3 scripts/check_release_version.py "${{ github.ref_name }}"
-
       - name: Extract changelog section for this version
+        # Runs before the tag is created: a missing/empty changelog section
+        # must fail here, before anything irreversible happens.
+        run: python3 scripts/extract_changelog.py "${{ needs.check.outputs.version }}" > release_notes.md
+
+      - name: Create and push release tag
         run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          python3 scripts/extract_changelog.py "$VERSION" > release_notes.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ needs.check.outputs.tag }}"
+          git push origin "${{ needs.check.outputs.tag }}"
 
       - name: Check PyPI publish state before publishing
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          python3 scripts/check_pypi_publish.py pre "$VERSION"
+        run: python3 scripts/check_pypi_publish.py pre "${{ needs.check.outputs.version }}"
 
       - name: Install build tools
         run: pip install build
@@ -48,13 +87,11 @@ jobs:
           skip-existing: true
 
       - name: Verify PyPI publish outcome
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          python3 scripts/check_pypi_publish.py post "$VERSION"
+        run: python3 scripts/check_pypi_publish.py post "${{ needs.check.outputs.version }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.check.outputs.tag }}
           files: dist/*
           body_path: release_notes.md
