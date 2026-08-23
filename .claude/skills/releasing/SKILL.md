@@ -133,7 +133,10 @@ bump also triggers this workflow, but only the cheap `check` job runs for it - l
 
 ## Verifying
 
-- `gh release view v<version>` - notes read sensibly, and the sdist and wheel are attached.
+- `gh release view v<version>` - notes read sensibly, and four assets are attached: the sdist and
+  wheel plus a `.publish.attestation` file for each. The attestations are generated automatically
+  by `pypa/gh-action-pypi-publish` under trusted publishing - nobody configures them, so their
+  presence is not a sign of misconfiguration.
 - `uvx eddn-tail@<version> --help` in a clean shell, or `pip install eddn-tail==<version>` in a
   throwaway venv followed by `eddn-tail --help`. This is the install path users actually take, and
   it is the only check that the published wheel is importable and its entry point resolves.
