@@ -47,12 +47,12 @@ This applies to release commits too - see the Release section.
 ## Build & test
 
 ```bash
-pip install -e ".[dev]"
-python3 -m pytest        # 125 tests, ~2s, no network required (tests bind a local ZMQ PUB socket)
-ruff check .             # must be clean
-pytest --cov=eddn_tail --cov-report=term-missing   # coverage, currently ~53%
-python3 eddn_tail.py     # run from source
-python3 -m build         # sdist + wheel into dist/
+uv sync --extra dev
+uv run pytest                              # 125 tests, ~2s, no network required (tests bind a local ZMQ PUB socket)
+uv run ruff check .                        # must be clean
+uv run pytest --cov=eddn_tail --cov-report=term-missing   # coverage, currently ~53%
+uv run python3 eddn_tail.py                # run from source
+uv build                                   # sdist + wheel into dist/
 ```
 
 Config lives in `pyproject.toml`: `[tool.ruff]` (py39 target, line-length 160, rules `E,F,W,I,B,C4,UP`), `[tool.pytest.ini_options]` (`--strict-markers --strict-config`, `filterwarnings = ["error"]`, so any new warning fails the suite), and `[tool.coverage.*]`. Ruff is pinned exactly (`ruff==0.15.12`) in the `dev` extra and the build workflow installs it from there, so bumping ruff is a one-line change in `pyproject.toml`. There is no coverage gate; the misses are concentrated in the Textual UI layer (`_poll_messages`, `_refresh_table`, the event and `action_*` handlers) and `main()`, none of which is driven by a real app instance today - Textual's `run_test()` pilot is the way in if that changes.

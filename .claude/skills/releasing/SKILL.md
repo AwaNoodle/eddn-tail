@@ -33,7 +33,7 @@ than pushed independently, so the two cannot disagree, and the check became a ta
 
 | Step | Command |
 |---|---|
-| Verify | `python3 -m pytest -q` · `ruff check .` |
+| Verify | `uv run --extra dev pytest -q` · `uv run --extra dev ruff check .` |
 | Branch | `git checkout -b <version>-release` |
 | Bump | edit `version` in `pyproject.toml` |
 | Roll up changelog | rename `## [Unreleased]` to `## [<version>] - <date>` in `CHANGELOG.md`, add a fresh empty `## [Unreleased]` above it |
@@ -50,8 +50,8 @@ There is no tag or push step left to run by hand - merging the PR is the release
 
 - Every change intended for this release is already merged into `main`.
 - `main` is pulled and the working tree is clean.
-- `python3 -m pytest -q` and `ruff check .` both pass locally. The build workflow re-runs the tests on 3.9 through
-  3.13, so a version-specific failure can still surface there.
+- `uv run --extra dev pytest -q` and `uv run --extra dev ruff check .` both pass locally. The build workflow
+  re-runs the tests on 3.9 through 3.13, so a version-specific failure can still surface there.
 - The `release` environment exists on the repo with PyPI trusted publishing configured for the
   `eddn-tail` project, and with required reviewers configured so the publish step pauses for human
   approval before it runs. Without trusted publishing, the publish step fails at OIDC, after the tag
@@ -89,7 +89,7 @@ pre-release path today - `check_release_needed.py` only ever compares against a 
 
    **Wait for the Build workflow to go green before merging.** `.github/workflows/build.yml` runs
    pytest on Python 3.9 to 3.13 and ruff on 3.13 for every PR to `main`. It is the only gate before
-   the merge, and it does not exercise the release path at all: it never runs `python -m build` and never
+   the merge, and it does not exercise the release path at all: it never runs `uv build` and never
    touches PyPI. A packaging break passes Build clean and only surfaces after the merge, in the
    `release` job.
 
@@ -116,7 +116,7 @@ Nothing to run by hand. Once the merge in step 6 lands:
 3. Extracts the `## [<version>]` section from `CHANGELOG.md` (`scripts/extract_changelog.py`) -
    fails in seconds if that section is missing or empty, before the tag is created.
 4. Creates and pushes the `v<version>` tag.
-5. Builds the sdist and wheel (`python -m build`).
+5. Builds the sdist and wheel (`uv build`).
 6. Publishes to PyPI (`skip-existing: true`, so a retry of a partially-failed release is not a hard
    error), then runs `scripts/check_pypi_publish.py`, which polls PyPI's JSON API (cache-busted,
    up to ~80s) until the version appears, and reports in the job summary whether this run actually
@@ -200,7 +200,7 @@ created" case above (delete the tag, fix forward) since PyPI itself was never ac
 | Bumping `pyproject.toml` without a matching `CHANGELOG.md` section | Caught by the release workflow after merge - `scripts/extract_changelog.py` fails within seconds if the `## [<version>]` section is missing or empty, before the tag is created |
 | Assuming a re-run retries a stuck PyPI publish | Not automatic - once the tag exists, `check` reports `release_needed: false` and the whole `release` job (including publish) is skipped on any later run. See Recovery above for the manual path |
 | Merging the release PR on a red Build | Not caught - the same failure recurs in the `release` job, after the merge |
-| Assuming Build validates packaging | Not caught - Build never runs `python -m build`, so packaging breaks surface only post-merge, in `release.yml` |
+| Assuming Build validates packaging | Not caught - Build never runs `uv build`, so packaging breaks surface only post-merge, in `release.yml` |
 | Not approving the `release` environment deployment | The `release` job sits waiting indefinitely; nothing times out on its own |
 | Creating the GitHub Release by hand before the workflow runs | The workflow's `softprops/action-gh-release` step will overwrite it |
 | Pushing a non-release commit to `main` and expecting nothing to happen | Correct expectation, but confirm it in the log: `check` still runs (cheap, ungated) and should report "already released, nothing to do" |

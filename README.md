@@ -123,8 +123,8 @@ Supported schemas: `journal/1`, `commodity/3`, `outfitting/2`, `shipyard/2`.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync --extra dev
+uv run pytest
 ```
 
 ## License

@@ -59,6 +59,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
       - name: Extract changelog section for this version
         # Runs before the tag is created: a missing/empty changelog section
         # must fail here, before anything irreversible happens.
@@ -74,11 +77,8 @@ jobs:
       - name: Check PyPI publish state before publishing
         run: python3 scripts/check_pypi_publish.py pre "${{ needs.check.outputs.version }}"
 
-      - name: Install build tools
-        run: pip install build
-
       - name: Build package
-        run: python -m build
+        run: uv build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
