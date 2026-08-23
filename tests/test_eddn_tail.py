@@ -160,8 +160,8 @@ def _static_text(widget):
     return str(widget.visual)
 
 
-def _detail_plain_text(widget):
-    """Read the plain (uncoloured) text of the detail pane's rich.json.JSON renderable.
+def _visual_renderable(widget):
+    """Read the private `_renderable` attribute off a widget's Visual, failing legibly.
 
     The detail pane is updated with a rich.json.JSON instance (not a plain string),
     so str(widget.visual) - which works for plain-text Static widgets - would return
@@ -170,11 +170,33 @@ def _detail_plain_text(widget):
     `_renderable` attribute is the original object we passed in; this holds across
     both the project's textual floor (2.0) and current releases, even though the
     private attribute Static itself uses to stash that object differs between them.
+
+    `_renderable` is private: there is no public accessor for it that spans the
+    project's supported textual range (>=2.0,<9). That is a considered choice, not
+    an oversight - but it means a future Textual release could drop or rename the
+    attribute out from under us. If that happens, fail with a message that says so
+    instead of a bare AttributeError.
+    """
+    try:
+        return widget.visual._renderable
+    except AttributeError as e:
+        raise AttributeError(
+            "Textual's internal Visual layout changed; this helper reads a private "
+            "attribute (`_renderable`) because no public accessor spans the project's "
+            "supported textual range (>=2.0,<9). Find the current equivalent and update "
+            "this helper."
+        ) from e
+
+
+def _detail_plain_text(widget):
+    """Read the plain (uncoloured) text of the detail pane's rich.json.JSON renderable.
+
     rich.json.JSON implements __rich__() by returning its highlighted `.text` (a
     rich.text.Text), so Textual's visualize() stores that Text as `_renderable`
     directly; `.plain` gives the underlying string with no colour/markup applied.
+    See _visual_renderable() above for why `_renderable` is read at all.
     """
-    return widget.visual._renderable.plain
+    return _visual_renderable(widget).plain
 
 
 def _feed_messages(app, messages):
@@ -1679,7 +1701,7 @@ class TestPilotRowSelection:
             await pilot.pause()
 
             detail = app.query_one("#detail-content", Static)
-            renderable = detail.visual._renderable
+            renderable = _visual_renderable(detail)
 
         console = Console(force_terminal=True, color_system="standard", width=80)
         with console.capture() as capture:
