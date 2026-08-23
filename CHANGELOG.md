@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Releases are now cut by merging a version bump to `main`, instead of tagging and pushing by
+  hand. `release.yml` triggers on push to `main`, checks whether the version in `pyproject.toml`
+  is already tagged, and if not runs the changelog guard, creates and pushes the tag, builds,
+  publishes to PyPI, and creates the GitHub Release - all in one workflow run, gated by the
+  `release` environment's approval step.
+- Project tooling (dev setup, `build.yml`, and the release build) now uses `uv` instead of `pip`.
+  User-facing install instructions (`pip install eddn-tail`, `uvx eddn-tail`) are unchanged.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

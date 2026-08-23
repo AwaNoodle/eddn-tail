@@ -8,7 +8,7 @@ TUI (Textual) that tails the EDDN ZeroMQ stream. Single-module app.
 eddn_tail.py              # entire application (~700 lines)
 tests/test_eddn_tail.py   # entire test suite (125 tests, pytest)
 pyproject.toml            # hatchling build, deps, console script `eddn-tail`
-.github/workflows/        # build.yml (test + lint), release.yml (tag -> PyPI + GitHub Release)
+.github/workflows/        # build.yml (test + lint), release.yml (push to main -> PyPI + GitHub Release)
 demo.tape / demo.gif      # VHS demo recording (GIF is Git LFS)
 .claude/skills/releasing/  # release runbook (invoke with /releasing)
 ```
@@ -47,12 +47,12 @@ This applies to release commits too - see the Release section.
 ## Build & test
 
 ```bash
-pip install -e ".[dev]"
-python3 -m pytest        # 125 tests, ~2s, no network required (tests bind a local ZMQ PUB socket)
-ruff check .             # must be clean
-pytest --cov=eddn_tail --cov-report=term-missing   # coverage, currently ~53%
-python3 eddn_tail.py     # run from source
-python3 -m build         # sdist + wheel into dist/
+uv sync --extra dev
+uv run pytest                              # 125 tests, ~2s, no network required (tests bind a local ZMQ PUB socket)
+uv run ruff check .                        # must be clean
+uv run pytest --cov=eddn_tail --cov-report=term-missing   # coverage, currently ~53%
+uv run python3 eddn_tail.py                # run from source
+uv build                                   # sdist + wheel into dist/
 ```
 
 Config lives in `pyproject.toml`: `[tool.ruff]` (py39 target, line-length 160, rules `E,F,W,I,B,C4,UP`), `[tool.pytest.ini_options]` (`--strict-markers --strict-config`, `filterwarnings = ["error"]`, so any new warning fails the suite), and `[tool.coverage.*]`. Ruff is pinned exactly (`ruff==0.15.12`) in the `dev` extra and the build workflow installs it from there, so bumping ruff is a one-line change in `pyproject.toml`. There is no coverage gate; the misses are concentrated in the Textual UI layer (`_poll_messages`, `_refresh_table`, the event and `action_*` handlers) and `main()`, none of which is driven by a real app instance today - Textual's `run_test()` pilot is the way in if that changes.
@@ -61,10 +61,19 @@ The build workflow (`build.yml`) runs pytest with coverage on Python 3.9-3.13 an
 
 ## Release
 
-1. Bump `version` in `pyproject.toml` (single source of truth; nothing else hardcodes it).
+1. Bump `version` in `pyproject.toml` (single source of truth; nothing else hardcodes it) and roll
+   up `CHANGELOG.md`'s `## [Unreleased]` section.
 2. Land the change on `main` via PR, and ensure the build is green.
-3. Tag `vX.Y.Z` (must match `v[0-9]+.[0-9]+.[0-9]+`) and push the tag with `git push --tags`.
 
-`release.yml` then builds the sdist/wheel, publishes to PyPI via trusted publishing (OIDC, `release` environment, `skip-existing`), and creates a GitHub Release with generated notes and those two files attached. PyPI is the only distribution channel; users run the tool via `uvx eddn-tail`, a `pip install`, or straight from a checkout.
+Merging is the release trigger - there is no manual tag or push step. `release.yml` runs on every
+push to `main`: a cheap, ungated `check` job compares `pyproject.toml`'s version against existing
+tags and does nothing on ordinary pushes. When it finds an unreleased version, a `release` job
+(gated by the `release` GitHub environment, which pauses for a required reviewer's approval) checks
+the changelog, creates and pushes the `v<version>` tag, builds the sdist/wheel,
+publishes to PyPI via trusted publishing (OIDC, `skip-existing`), and creates a GitHub Release with
+the extracted changelog section and those two files attached. PyPI is the only distribution
+channel; users run the tool via `uvx eddn-tail`, a `pip install`, or straight from a checkout.
+
+Full runbook: `.claude/skills/releasing/SKILL.md` (invoke with `/releasing`).
 
 Full runbook, including the unguarded failure modes (nothing checks the tag against `pyproject.toml`, and `skip-existing` turns a botched retry into a green run), is in `.claude/skills/releasing/SKILL.md` - invoke it with `/releasing`.
