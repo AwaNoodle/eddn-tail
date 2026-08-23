@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project tooling (dev setup, `build.yml`, and the release build) now uses `uv` instead of `pip`.
   User-facing install instructions (`pip install eddn-tail`, `uvx eddn-tail`) are unchanged.
 
+### Fixed
+
+- The changelog guard (`scripts/extract_changelog.py`) now fails if the extracted section
+  contains the same `###` subsection heading more than once, or if the changelog has more than
+  one `## [<version>]` heading for the same version. Previously two PRs could each add their own
+  `### Fixed` heading under the same version and the guard would pass, publishing broken-looking
+  release notes with a duplicated heading.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added
