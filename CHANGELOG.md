@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub Releases no longer carry a spurious `default.gitignore` asset. `uv build`
+  writes a `.gitignore` into `dist/`, which the `dist/*` upload glob swept up; the
+  workflow now attaches the sdist, wheel, and attestations by explicit pattern.
+
 ## [0.4.1] - 2026-08-24
 
 No user-facing changes. The application code is unchanged from 0.4.0; this

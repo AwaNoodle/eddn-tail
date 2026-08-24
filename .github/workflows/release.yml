@@ -93,5 +93,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check.outputs.tag }}
-          files: dist/*
+          # Explicit patterns, not dist/* - `uv build` writes a .gitignore into
+          # dist/, which the glob would sweep up and GitHub would attach as
+          # "default.gitignore". Attestations are produced by the publish step.
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.publish.attestation
           body_path: release_notes.md
