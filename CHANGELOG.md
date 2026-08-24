@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-24
+
+No user-facing changes. The application code is unchanged from 0.4.0; this
+release covers project infrastructure only.
+
 ### Changed
 
 - Releases are now cut by merging a version bump to `main`, instead of tagging and pushing by
