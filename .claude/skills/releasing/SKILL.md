@@ -56,6 +56,17 @@ There is no tag or push step left to run by hand - merging the PR is the release
   `eddn-tail` project, and with required reviewers configured so the publish step pauses for human
   approval before it runs. Without trusted publishing, the publish step fails at OIDC, after the tag
   exists. Without a reviewer, the release job runs unattended the moment the merge lands.
+- That environment's **deployment branch policy must allow `main`**. The `release` job now runs on
+  a push to `main`, not on a tag push, so an environment restricted to `v*` tags refuses the
+  deployment and the job dies before its first step. Check it with:
+
+  ```
+  gh api repos/AwaNoodle/eddn-tail/environments/release/deployment-branch-policies \
+    --jq '.branch_policies[] | "\(.name) (\(.type))"'
+  ```
+
+  `main (branch)` must be in that list. This bit the v0.4.1 release: the policy still allowed only
+  `v*` tags, left over from the tag-triggered flow, and the symptom was baffling (see Recovery).
 - Nothing else needs bumping. `version` in `pyproject.toml` is the only place the number lives.
 - `CHANGELOG.md` has something under `## [Unreleased]` to roll up. If it is empty, the changelog
   guard fails the release before it builds anything - after the merge, before the tag is created.
@@ -133,8 +144,10 @@ bump also triggers this workflow, but only the cheap `check` job runs for it - l
 
 ## Verifying
 
-- `gh release view v<version>` - notes read sensibly, and four assets are attached: the sdist and
-  wheel plus a `.publish.attestation` file for each. The attestations are generated automatically
+- `gh release view v<version>` - notes read sensibly, and **exactly four** assets are attached: the
+  sdist and wheel plus a `.publish.attestation` file for each. A fifth asset named
+  `default.gitignore` means the upload glob has regressed to `dist/*` and is sweeping up the
+  `.gitignore` that `uv build` writes into `dist/` (it happened on v0.4.1). The attestations are generated automatically
   by `pypa/gh-action-pypi-publish` under trusted publishing - nobody configures them, so their
   presence is not a sign of misconfiguration.
 - `uvx eddn-tail@<version> --help` in a clean shell, or `pip install eddn-tail==<version>` in a
@@ -152,10 +165,27 @@ deletion. Fix forward with the next patch version. If the bad release is activel
 on the PyPI web UI (yanking hides it from resolution while leaving existing pins working) and
 optionally mark the GitHub Release as a pre-release: `gh release edit v<version> --prerelease`.
 
+**The `release` job failed instantly with no steps and no logs.** `check` succeeded, `release`
+shows `failure`, and expanding it lists no steps at all - there is nothing to read, which makes
+this look like a broken workflow. It is almost always the `release` environment refusing the
+deployment because its branch policy does not allow the ref. Confirm with the
+`deployment-branch-policies` command in Preconditions; if `main (branch)` is missing, add it:
+
+```
+gh api repos/AwaNoodle/eddn-tail/environments/release/deployment-branch-policies \
+  -X POST -f name='main' -f type='branch'
+```
+
+Nothing ran, so no tag exists and nothing was published - the version number is untouched. Because
+the fault is in repository settings rather than in the repo, **`gh run rerun <run-id>` is the right
+recovery here**; no new PR or commit is needed. After the re-run, `release` should sit in `waiting`
+for approval rather than failing.
+
 **Run failed before the tag was created** (changelog guard, or the environment approval was
-rejected). Nothing happened at all - no tag, nothing published. Fix the cause (e.g. a changelog
-edit) on a new PR and merge again; the `check` job will still see `v<version>` missing and retry
-the whole flow.
+rejected). Nothing happened at all - no tag, nothing published. If the cause is in the repo (a
+changelog problem), fix it on a new PR and merge again; the `check` job will still see `v<version>`
+missing and retry the whole flow. If the cause was outside the repo (a rejected approval, a
+settings problem), `gh run rerun <run-id>` is enough.
 
 **Run failed after the tag was created but before or during the PyPI publish step** (build error,
 OIDC failure). Nothing was published, so the number is still reusable, but the tag now exists on
@@ -205,6 +235,7 @@ created" case above (delete the tag, fix forward) since PyPI itself was never ac
 | Merging the release PR on a red Build | Not caught - the same failure recurs in the `release` job, after the merge |
 | Assuming Build validates packaging | Not caught - Build never runs `uv build`, so packaging breaks surface only post-merge, in `release.yml` |
 | Not approving the `release` environment deployment | The `release` job sits waiting indefinitely; nothing times out on its own |
+| The `release` environment's branch policy not allowing `main` | The deployment is refused and the `release` job fails with zero steps and no logs, which reads as a broken workflow rather than a settings problem. See Recovery |
 | Creating the GitHub Release by hand before the workflow runs | The workflow's `softprops/action-gh-release` step will overwrite it |
 | Pushing a non-release commit to `main` and expecting nothing to happen | Correct expectation, but confirm it in the log: `check` still runs (cheap, ungated) and should report "already released, nothing to do" |
 
