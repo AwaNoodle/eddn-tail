@@ -33,7 +33,7 @@ than pushed independently, so the two cannot disagree, and the check became a ta
 
 | Step | Command |
 |---|---|
-| Verify | `uv run --extra dev pytest -q` · `uv run --extra dev ruff check .` |
+| Verify | `uv run --extra dev pytest -q` · `uv run --extra dev ruff check .` · `uv build` · `uvx --from dist/eddn_tail-<version>-py3-none-any.whl eddn-tail --help` · `rm -rf dist/` |
 | Branch | `git checkout -b <version>-release` |
 | Bump | edit `version` in `pyproject.toml` |
 | Roll up changelog | rename `## [Unreleased]` to `## [<version>] - <date>` in `CHANGELOG.md`, add a fresh empty `## [Unreleased]` above it |
@@ -108,7 +108,7 @@ pre-release path today - `check_release_needed.py` only ever compares against a 
    rm -rf dist/
    ```
 
-   Delete `dist/` afterwards: `uv build` writes a `.gitignore` into it, and the artifacts must not be committed.
+   Delete `dist/` afterwards: stale wheels pile up there, and `uvx --from dist/...` could install the wrong one. (The `.gitignore` that `uv build` writes already keeps the artifacts out of commits.)
 
    **Wait for the Build workflow to go green before merging.** `.github/workflows/build.yml` runs
    pytest on Python 3.9 to 3.13 and ruff on 3.13 for every PR to `main`. It is the only CI gate before
@@ -254,8 +254,7 @@ created" case above (delete the tag, fix forward) since PyPI itself was never ac
 These are unguarded today. If a release ever goes wrong in one of these ways, the durable fix is a
 a check in the release workflow, not more care:
 
-- No automated smoke test that the published wheel installs and runs - Verifying above covers this
-  manually, after the fact.
+- The wheel smoke test is manual: step 5 covers it before merge, but no CI job enforces it. Build never runs `uv build`, and nothing in the release job smoke-tests the published wheel.
 - `scripts/check_pypi_publish.py` depends on the public `https://pypi.org/pypi/<project>/json`
   endpoint. It polls for ~80s to ride out CDN lag, but a longer outage there still fails the whole
   run even if the actual PyPI publish succeeded.
