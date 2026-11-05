@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The app reconnects when no message has arrived for 60 s, replacing a connection that dropped silently. The
+  reconnect is silent, and pausing does not trigger one.
+
 ### Fixed
 
 - GitHub Releases no longer carry a spurious `default.gitignore` asset. `uv build`
   writes a `.gitignore` into `dist/`, which the `dist/*` upload glob swept up; the
   workflow now attaches the sdist, wheel, and attestations by explicit pattern.
+- The UI no longer stalls on the live feed. Socket reads no longer wait 100 ms per poll, so keypresses register
+  immediately instead of up to about 1 s late. No messages are lost: libzmq queues them.
 
 ## [0.4.1] - 2026-08-24
 

@@ -16,11 +16,11 @@ demo.tape / demo.gif      # VHS demo recording (GIF is Git LFS)
 ## App structure (`eddn_tail.py`)
 
 - Module constants: `EDDN_ENDPOINTS` (live/beta/dev), `SCHEMA_SHORT`, `SCHEMA_EVENT`, `SCHEMA_COLORS`, `MIN/MAX/DEFAULT_EVENT_LIMIT`.
-- `EDDNReceiver` - ZMQ SUB socket, 100 ms RCVTIMEO; `recv_message()` zlib-decompresses and JSON-parses, returns `None` on timeout or `{"_error": ...}` on bad payloads.
+- `EDDNReceiver` - ZMQ SUB socket with `RCVTIMEO = 0` (never wait; the 50 ms poll tick drains what libzmq has queued). `recv_message()` zlib-decompresses and JSON-parses, returns `None` when nothing is queued or `{"_error": ...}` on bad payloads. Do NOT reintroduce a nonzero RCVTIMEO: it blocks Textual's event loop and stalls keypresses on the live feed.
 - `extract_summary(msg)` - flattens an EDDN message into the display dict used by every filter and by `_format_row`.
 - `EDDNTailApp(App)` - the UI. Key points:
   - Two parallel `OrderedDict`s keyed by stringified message counter: `_messages` (summaries) and `_raw_messages` (full JSON for the detail pane / export). Keep them in sync in any change.
-  - `_poll_messages()` runs on a 0.05 s interval, drains up to 50 messages, applies CLI filters then the live filter (non-matching messages are discarded, never stored), enforces the FIFO limit, appends a row, then auto-scrolls once per batch.
+  - `_poll_messages()` runs on a 0.05 s interval, drains up to 50 messages (`_last_rx` is set on every frame, including `_error` frames), applies CLI filters then the live filter (non-matching messages are discarded, never stored), enforces the FIFO limit, appends a row, then auto-scrolls once per batch. After the drain it calls `_reconnect_if_silent()`, which replaces the receiver silently when nothing has arrived for `SILENCE_TIMEOUT_SECONDS` (60). Pausing skips the whole tick; resuming resets `_last_rx`. Keep this watchdog when changing the poll loop.
   - Filters: CLI filters (`_matches_cli_filters`, substring, lowercased at construction) vs. the live `/` filter (`_matches_live_filter`, regex via cached `_live_filter_pattern`). They are separate on purpose - CLI drops increment `_filtered_count`, live-hidden rows are counted in `_refresh_table`.
   - `_refresh_table()` rebuilds the table from `_messages`; `_update_stats()` and `_update_pane_titles()` run on a 1 s interval.
 - `build_parser()` / `main()` - argparse; `--beta`/`--dev` are mutually exclusive; `--limit` validated against MIN/MAX.
