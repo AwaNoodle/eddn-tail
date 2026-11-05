@@ -541,16 +541,13 @@ class TestEDDNReceiver:
             pub.close(linger=0)
             ctx.term()
 
-    def test_invalid_zlib_returns_error(self):
-        """Sending raw (non-zlib) bytes should produce an _error dict."""
-        self._assert_error_frame(b"this is not zlib compressed")
-
-    def test_invalid_json_returns_error(self):
-        """Sending zlib-compressed non-JSON should produce an _error dict."""
-        self._assert_error_frame(zlib.compress(b"not valid json{"))
-
-    def _assert_error_frame(self, payload):
-        """Publish `payload` and assert the receiver reports it as an _error dict."""
+    @pytest.mark.parametrize(
+        "payload",
+        [b"this is not zlib compressed", zlib.compress(b"not valid json{")],
+        ids=["bad-zlib", "bad-json"],
+    )
+    def test_invalid_payload_returns_error(self, payload):
+        """Undecodable or non-JSON frames should produce an _error dict."""
         ctx, pub, receiver = self._setup_receiver()
         try:
             pub.send(payload)
