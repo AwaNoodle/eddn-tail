@@ -98,11 +98,21 @@ pre-release path today - `check_release_needed.py` only ever compares against a 
 5. Open the PR (`chore: release v<version>`). Body should state the version bump, a one-line
    summary of what is in the release, and the local verification results.
 
+   **Build and smoke-test the wheel before opening the PR.** `.github/workflows/build.yml` never runs
+   `uv build`, so a packaging break would otherwise only surface after the merge, inside the
+   irreversible `release` job. Run the same build locally, then install the wheel and run its entry point:
+
+   ```
+   uv build
+   uvx --from dist/eddn_tail-<version>-py3-none-any.whl eddn-tail --help
+   rm -rf dist/
+   ```
+
+   Delete `dist/` afterwards: `uv build` writes a `.gitignore` into it, and the artifacts must not be committed.
+
    **Wait for the Build workflow to go green before merging.** `.github/workflows/build.yml` runs
-   pytest on Python 3.9 to 3.13 and ruff on 3.13 for every PR to `main`. It is the only gate before
-   the merge, and it does not exercise the release path at all: it never runs `uv build` and never
-   touches PyPI. A packaging break passes Build clean and only surfaces after the merge, in the
-   `release` job.
+   pytest on Python 3.9 to 3.13 and ruff on 3.13 for every PR to `main`. It is the only CI gate before
+   the merge, and it does not exercise the release path: it never runs `uv build` and never touches PyPI.
 
    There is no direct-to-main option worth taking here: `main` is protected, so every change,
    including this one, goes through a PR regardless.
@@ -233,7 +243,7 @@ created" case above (delete the tag, fix forward) since PyPI itself was never ac
 | Bumping `pyproject.toml` without a matching `CHANGELOG.md` section | Caught by the release workflow after merge - `scripts/extract_changelog.py` fails within seconds if the `## [<version>]` section is missing or empty, before the tag is created |
 | Assuming a re-run retries a stuck PyPI publish | Not automatic - once the tag exists, `check` reports `release_needed: false` and the whole `release` job (including publish) is skipped on any later run. See Recovery above for the manual path |
 | Merging the release PR on a red Build | Not caught - the same failure recurs in the `release` job, after the merge |
-| Assuming Build validates packaging | Not caught - Build never runs `uv build`, so packaging breaks surface only post-merge, in `release.yml` |
+| Assuming Build validates packaging | Not caught by CI - Build never runs `uv build`. Run the local build and wheel smoke test in step 5 before opening the PR |
 | Not approving the `release` environment deployment | The `release` job sits waiting indefinitely; nothing times out on its own |
 | The `release` environment's branch policy not allowing `main` | The deployment is refused and the `release` job fails with zero steps and no logs, which reads as a broken workflow rather than a settings problem. See Recovery |
 | Creating the GitHub Release by hand before the workflow runs | The workflow's `softprops/action-gh-release` step will overwrite it |
