@@ -23,6 +23,7 @@ from eddn_tail import (
     SCHEMA_COLORS,
     SCHEMA_EVENT,
     SCHEMA_SHORT,
+    SILENCE_TIMEOUT_SECONDS,
     EDDNReceiver,
     EDDNTailApp,
     build_parser,
@@ -111,6 +112,17 @@ def _bind_zmq_pub() -> tuple:
     return ctx, pub, url
 
 
+def _recv_within(receiver, timeout=1.0):
+    """Poll a non-blocking EDDNReceiver until a message arrives or `timeout` seconds pass."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        msg = receiver.recv_message()
+        if msg is not None:
+            return msg
+        time.sleep(0.01)
+    return None
+
+
 class _FakeReceiver:
     """Deterministic stand-in for EDDNReceiver used to feed a running pilot app.
 
@@ -121,6 +133,7 @@ class _FakeReceiver:
 
     def __init__(self, messages):
         self._queue = list(messages)
+        self.closed = False
 
     def recv_message(self):
         if self._queue:
@@ -128,7 +141,7 @@ class _FakeReceiver:
         return None
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def _raw_journal_message(system="Sol", event="Scan", body="Earth", uploader_id="cmdr1", gateway_ts="2026-05-10T22:36:19Z"):
@@ -507,7 +520,7 @@ class TestEDDNReceiver:
                 "message": {"event": "Scan", "StarSystem": "Sol"},
             }
             pub.send(_compress(msg))
-            result = receiver.recv_message()
+            result = _recv_within(receiver)
             assert result is not None
             assert result["message"]["event"] == "Scan"
         finally:
@@ -533,7 +546,7 @@ class TestEDDNReceiver:
         ctx, pub, receiver = self._setup_receiver()
         try:
             pub.send(b"this is not zlib compressed")
-            result = receiver.recv_message()
+            result = _recv_within(receiver)
             assert result is not None
             assert "_error" in result
         finally:
@@ -546,7 +559,7 @@ class TestEDDNReceiver:
         ctx, pub, receiver = self._setup_receiver()
         try:
             pub.send(zlib.compress(b"not valid json{"))
-            result = receiver.recv_message()
+            result = _recv_within(receiver)
             assert result is not None
             assert "_error" in result
         finally:
@@ -1494,6 +1507,83 @@ class TestErrorHandling:
                "header": {"uploaderID": "test"},
                "message": {"event": "Scan"}}
         assert "_error" not in msg
+
+
+# ---------------------------------------------------------------------------
+# 10b. Silence watchdog
+# ---------------------------------------------------------------------------
+
+
+class TestSilenceWatchdog:
+    """The poll tick replaces a receiver that has been silent past SILENCE_TIMEOUT_SECONDS."""
+
+    @staticmethod
+    def _stale_app(messages=()):
+        """App holding a _FakeReceiver, with the silence clock already past the timeout."""
+        app = _make_app()
+        fake = _FakeReceiver(messages)
+        app._receiver = fake
+        app._last_rx = time.monotonic() - SILENCE_TIMEOUT_SECONDS - 1
+        return app, fake
+
+    @staticmethod
+    def _close_real_receiver(app):
+        """Close an EDDNReceiver the watchdog created; filterwarnings=error fails on a leaked ZMQ context."""
+        if isinstance(app._receiver, EDDNReceiver):
+            app._receiver.close()
+
+    def test_reconnects_after_silence(self):
+        app, fake = self._stale_app()
+        try:
+            app._poll_messages()
+            assert fake.closed is True
+            assert isinstance(app._receiver, EDDNReceiver)
+            assert time.monotonic() - app._last_rx < 1
+        finally:
+            self._close_real_receiver(app)
+
+    def test_no_reconnect_before_timeout(self):
+        app, fake = self._stale_app()
+        try:
+            app._last_rx = time.monotonic() - SILENCE_TIMEOUT_SECONDS + 5
+            app._poll_messages()
+            assert app._receiver is fake
+            assert fake.closed is False
+        finally:
+            self._close_real_receiver(app)
+
+    def test_malformed_frame_counts_as_liveness(self):
+        app, fake = self._stale_app([{"_error": "bad zlib"}])
+        try:
+            app._poll_messages()
+            assert app._receiver is fake
+            assert fake.closed is False
+            assert time.monotonic() - app._last_rx < 1
+        finally:
+            self._close_real_receiver(app)
+
+    def test_no_reconnect_while_paused(self):
+        app, fake = self._stale_app()
+        try:
+            app._paused = True
+            app._poll_messages()
+            assert app._receiver is fake
+            assert fake.closed is False
+        finally:
+            self._close_real_receiver(app)
+
+    def test_resume_restarts_silence_clock(self):
+        app, fake = self._stale_app()
+        try:
+            app._paused = True
+            app.action_toggle_pause()
+            assert app._paused is False
+            assert time.monotonic() - app._last_rx < 1
+            app._poll_messages()
+            assert app._receiver is fake
+            assert fake.closed is False
+        finally:
+            self._close_real_receiver(app)
 
 
 # ---------------------------------------------------------------------------

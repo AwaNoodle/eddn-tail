@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 import zlib
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -81,10 +82,10 @@ class EDDNReceiver:
         self._sock = self._ctx.socket(zmq.SUB)
         self._sock.connect(endpoint)
         self._sock.setsockopt_string(zmq.SUBSCRIBE, topic_filter)
-        self._sock.RCVTIMEO = 100  # ms - short timeout for responsive cancellation
+        self._sock.RCVTIMEO = 0  # never wait: libzmq queues messages on its own I/O thread; the poll tick drains what is queued
 
     def recv_message(self) -> dict | None:
-        """Receive a single message. Returns None on timeout."""
+        """Receive a single queued message. Returns None when nothing is queued."""
         try:
             raw = self._sock.recv()
             decompressed = zlib.decompress(raw)
@@ -152,6 +153,12 @@ def extract_summary(msg: dict) -> dict:
 MIN_EVENT_LIMIT = 1
 MAX_EVENT_LIMIT = 1999
 DEFAULT_EVENT_LIMIT = 500
+
+# Reconnect when nothing has arrived for this long. A silently dropped TCP
+# connection never raises an error, so silence is the only signal. EDCD's
+# reference listeners use 60 s. Beta/dev are often silent for minutes; there
+# the periodic reconnect is harmless because nothing is arriving.
+SILENCE_TIMEOUT_SECONDS = 60
 
 
 class EDDNTailApp(App):
@@ -234,6 +241,7 @@ class EDDNTailApp(App):
         self._max_event_limit = initial_limit
         self._limit_input_mode = False
         self._receiver: EDDNReceiver | None = None
+        self._last_rx = time.monotonic()
         self._poll_timer: Timer | None = None
         self._stats_timer: Timer | None = None
         self._paused = False
@@ -382,6 +390,7 @@ class EDDNTailApp(App):
             msg = self._receiver.recv_message()
             if msg is None:
                 break
+            self._last_rx = time.monotonic()
             if "_error" in msg:
                 continue
 
@@ -412,6 +421,8 @@ class EDDNTailApp(App):
 
             table.add_row(*self._format_row(summary), key=msg_key)
 
+        self._reconnect_if_silent()
+
         # Auto-scroll: move cursor once after the batch if near the bottom
         total_rows = len(table.rows)
         if total_rows > 0:
@@ -420,6 +431,14 @@ class EDDNTailApp(App):
                     table.move_cursor(row=total_rows - 1)
             except Exception:
                 pass
+
+    def _reconnect_if_silent(self) -> None:
+        """Replace the receiver when nothing has arrived for SILENCE_TIMEOUT_SECONDS."""
+        if time.monotonic() - self._last_rx <= SILENCE_TIMEOUT_SECONDS:
+            return
+        self._receiver.close()
+        self._receiver = EDDNReceiver(self._endpoint)
+        self._last_rx = time.monotonic()
 
     def _refresh_table(self) -> None:
         """Rebuild the table from stored messages, applying current filters."""
@@ -544,6 +563,9 @@ class EDDNTailApp(App):
 
     def action_toggle_pause(self) -> None:
         self._paused = not self._paused
+        if not self._paused:
+            # Nothing is read while paused; restart the silence clock on resume.
+            self._last_rx = time.monotonic()
         self._update_pane_titles()
 
     def action_toggle_detail(self) -> None:
