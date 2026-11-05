@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Pinned action versions (checkout, setup-python, ...) in .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  # Dev extra and the textual cap in pyproject.toml. `increase-if-necessary`
+  # keeps the runtime `>=` floors (pyzmq>=26.1, textual>=2.0, rich>=13.3.3) in
+  # place, since test-floor pins exactly those floors; it still widens the
+  # `<9` cap and bumps the exact `ruff==0.15.12` pin.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    versioning-strategy: "increase-if-necessary"
+    groups:
+      python-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
